@@ -33,11 +33,12 @@ async def run() -> None:
     log.info(
         "worker_starting",
         env=settings.app_env,
-        phase="7-media-capture",
+        phase="10-idempotency-recovery",
     )
     
     from app.db.database import AsyncSessionLocal
     from app.telegram.events import make_handler_factory
+    from app.services.recovery import RecoveryService
     from worker.supervisor import TelegramClientManager
     
     handler_factory = make_handler_factory(AsyncSessionLocal)
@@ -55,6 +56,12 @@ async def run() -> None:
             
     await manager.start()
     log.info("worker_started", status="manager running")
+
+    # Phase 10: Recovery scan — retry any PENDING records from before the restart.
+    # Runs once synchronously before entering the event loop.
+    recovery = RecoveryService(AsyncSessionLocal, manager)
+    recovery_summary = await recovery.run()
+    log.info("worker_recovery_done", **recovery_summary)
     
     try:
         await manager.run_forever()

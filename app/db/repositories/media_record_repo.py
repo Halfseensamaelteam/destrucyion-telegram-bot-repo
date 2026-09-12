@@ -165,3 +165,38 @@ class MediaRecordRepository:
         await self._session.flush()
         await self._session.refresh(record)
         return record
+
+    async def list_pending(
+        self,
+        telegram_account_id: int | None = None,
+        *,
+        limit: int = 500,
+    ) -> list[MediaRecord]:
+        """Return all PENDING records, optionally filtered to one account.
+
+        Used by RecoveryService on worker startup to retry any records that
+        were created but not forwarded before a crash/restart.
+
+        Results are ordered oldest-first so we process in arrival order.
+        """
+        q = (
+            select(MediaRecord)
+            .where(MediaRecord.status == MediaRecordStatus.PENDING)
+            .order_by(MediaRecord.created_at.asc())
+            .limit(limit)
+        )
+        if telegram_account_id is not None:
+            q = q.where(MediaRecord.telegram_account_id == telegram_account_id)
+        result = await self._session.execute(q)
+        return list(result.scalars().all())
+
+    async def reset_to_pending(self, record: MediaRecord) -> MediaRecord:
+        """Reset a FAILED record back to PENDING so it can be retried.
+
+        Only used by RecoveryService — never called on SAVED records.
+        """
+        record.status = MediaRecordStatus.PENDING
+        record.error = None
+        await self._session.flush()
+        await self._session.refresh(record)
+        return record
