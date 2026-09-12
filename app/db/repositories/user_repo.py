@@ -26,6 +26,13 @@ class UserRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_api_key_hash(self, key_hash: str) -> User | None:
+        """Look up a user by their stored API key hash. Used for API authentication."""
+        result = await self._session.execute(
+            select(User).where(User.api_key_hash == key_hash)
+        )
+        return result.scalar_one_or_none()
+
     async def create(
         self,
         *,

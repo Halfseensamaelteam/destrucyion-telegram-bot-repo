@@ -35,6 +35,7 @@ def create_app() -> FastAPI:
         redoc_url="/redoc" if settings.is_development else None,
     )
 
+    # Health check (public)
     @application.get("/api/health", tags=["health"])
     async def health() -> JSONResponse:
         """Return application health status.
@@ -51,8 +52,18 @@ def create_app() -> FastAPI:
             }
         )
 
+    # Phase 12: REST API routers
+    from app.api.routes import users, telegram, subscriptions, media, admin
+
+    application.include_router(users.router)
+    application.include_router(telegram.router)
+    application.include_router(subscriptions.router)
+    application.include_router(media.router)
+    application.include_router(admin.router)
+
     log.info("app_created", env=settings.app_env)
     return application
 
 
 app = create_app()
+

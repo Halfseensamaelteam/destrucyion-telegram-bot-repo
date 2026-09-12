@@ -28,6 +28,11 @@ class User(Base):
     first_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     last_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # API Key — stored as SHA-256 hex digest. The raw key is NEVER stored.
+    api_key_hash: Mapped[str | None] = mapped_column(
+        String(64), unique=True, nullable=True, index=True,
+        comment="SHA-256 hex digest of the user's API key. Raw key is never stored.",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

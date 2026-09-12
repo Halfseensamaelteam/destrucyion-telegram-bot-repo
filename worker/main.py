@@ -36,13 +36,14 @@ async def run() -> None:
         phase="10-idempotency-recovery",
     )
     
-    from app.db.database import AsyncSessionLocal
+    from app.db.session import _get_session_factory
     from app.telegram.events import make_handler_factory
     from app.services.recovery import RecoveryService
     from worker.supervisor import TelegramClientManager
     
-    handler_factory = make_handler_factory(AsyncSessionLocal)
-    manager = TelegramClientManager(AsyncSessionLocal, handler_factory=handler_factory)
+    session_factory = _get_session_factory()
+    handler_factory = make_handler_factory(session_factory)
+    manager = TelegramClientManager(session_factory, handler_factory=handler_factory)
     
     # Catch SIGINT and SIGTERM to gracefully stop the manager
     import signal
@@ -59,7 +60,7 @@ async def run() -> None:
 
     # Phase 10: Recovery scan — retry any PENDING records from before the restart.
     # Runs once synchronously before entering the event loop.
-    recovery = RecoveryService(AsyncSessionLocal, manager)
+    recovery = RecoveryService(session_factory, manager)
     recovery_summary = await recovery.run()
     log.info("worker_recovery_done", **recovery_summary)
     
