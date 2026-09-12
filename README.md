@@ -33,7 +33,18 @@ reading both.
 |-------|--------|-------------|
 | Phase 0 — Repository Audit | ✅ PASS | `docs/INITIAL-AUDIT.md` |
 | Phase 1 — Project Foundation | ✅ PASS | `app/`, `worker/`, `tests/`, `pyproject.toml` |
-| Phase 2–18 | ⏳ Pending | — |
+| Phase 2 — Local Environment Verification | ✅ PASS | `docs/TERMUX.md` |
+| Phase 3 — Database Schema & ORM | ✅ PASS | Alembic, ORM models |
+| Phase 4 — Tenant Management | ✅ PASS | `AccountService` |
+| Phase 5 — Telegram Client Infrastructure | ✅ PASS | `TelegramClientManager` |
+| Phase 6 — Authentication Flow | ✅ PASS | Telethon auth state machine |
+| Phase 7 — Subscriptions & Tiers | ✅ PASS | `SubscriptionService` |
+| Phase 8 — Media Capture Foundation | ✅ PASS | `MediaRecordRepository`, Constraints |
+| Phase 9 — Media Forwarding | ✅ PASS | `SavedMessagesService`, Metadata |
+| Phase 10 — Idempotency & Recovery | ✅ PASS | `RecoveryService`, DB state |
+| Phase 11 — Telegram Bot | ✅ PASS | Command Handlers (`ptb`) |
+| Phase 12 — FastAPI | ✅ PASS | REST API, API Keys, Isolation |
+| Phase 13–18 | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 
