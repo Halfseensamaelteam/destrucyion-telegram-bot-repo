@@ -69,6 +69,10 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Telegram Bot token from @BotFather.",
     )
+    admin_telegram_ids: list[int] = Field(
+        default_factory=list,
+        description="List of integer Telegram user IDs authorized to use /admin commands.",
+    )
 
     # ------------------------------------------------------------------
     # Session encryption
