@@ -1,7 +1,7 @@
 """
 app.telegram.events
 ~~~~~~~~~~~~~~~~~~~~
-Telethon event handler factory for media capture.
+Telethon event handler factory for media capture and Saved Messages forwarding.
 
 This module provides `make_handler_factory()` which returns a function
 suitable for the `handler_factory` argument in `TelegramClientManager`.
@@ -16,7 +16,8 @@ Design:
   - All exceptions are caught and logged. The handler never raises.
   - Media classification uses app.telegram.media (pure, no network).
   - Captured records are persisted via MediaCaptureService.
-  - Saving to Saved Messages is intentionally NOT done here (Phase 9).
+  - Phase 9: captured records are forwarded to Saved Messages via
+    SavedMessagesService immediately after recording.
 """
 
 from __future__ import annotations
@@ -29,8 +30,9 @@ from telethon.tl.types import Message
 
 from app.core.logging import get_logger
 from app.services.capture import CaptureContext, MediaCaptureService
+from app.services.saved_messages import SavedMessagesForwardError, SavedMessagesService
 from app.telegram.media import classify_message
-from app.telegram.metadata import extract_sender, extract_chat
+from app.telegram.metadata import extract_sender, extract_chat, SenderInfo, ChatInfo
 
 log = get_logger(__name__)
 
@@ -107,31 +109,79 @@ async def _handle_message(
         return
     user_id = managed.user_id
 
-    # Step 4-6: DB session per event — never shared across events
+    # Capture context is built outside the DB session to keep network calls
+    # (get_chat, get_sender) separate from the transaction.
+    ctx, sender_info, chat_info = await _build_context(
+        event=event,
+        message=message,
+        account_id=account_id,
+        user_id=user_id,
+        media_info=media_info,
+    )
+
     async with session_factory() as session:
-        ctx = await _build_context(
-            event=event,
-            message=message,
-            account_id=account_id,
-            user_id=user_id,
-            media_info=media_info,
-        )
-        service = MediaCaptureService(session)
-        record, created = await service.record(ctx)
+        capture_svc = MediaCaptureService(session)
+        record, created = await capture_svc.record(ctx)
         await session.commit()
 
-    if created:
-        log.info(
-            "media_captured",
+    if not created:
+        log.debug("media_already_known", account_id=account_id, record_id=record.id)
+        return
+
+    log.info(
+        "media_captured",
+        account_id=account_id,
+        record_id=record.id,
+        media_type=record.media_type,
+        ttl=record.ttl_seconds,
+        is_timed=media_info.is_self_destruct,
+    )
+
+    # Phase 9: forward to this account's own Saved Messages.
+    # Routing invariant: client belongs to account_id — validated by manager.
+    client = manager.get_client(account_id)
+    if client is None:
+        log.error(
+            "saved_messages_no_client",
             account_id=account_id,
             record_id=record.id,
-            media_type=record.media_type,
-            ttl=record.ttl_seconds,
-            is_timed=media_info.is_self_destruct,
         )
-        # Phase 9: forward record to Saved Messages here.
-    else:
-        log.debug("media_already_known", account_id=account_id, record_id=record.id)
+        async with session_factory() as session:
+            capture_svc = MediaCaptureService(session)
+            await capture_svc.mark_failed(record, error="Client not available for forwarding")
+            await session.commit()
+        return
+
+    fwd_svc = SavedMessagesService(client, account_id=account_id)
+    try:
+        result = await fwd_svc.forward(
+            message,
+            sender_info=sender_info,
+            chat_info=chat_info,
+            record=record,
+        )
+        async with session_factory() as session:
+            capture_svc = MediaCaptureService(session)
+            await capture_svc.mark_saved(record, saved_message_id=result.saved_message_id)
+            await session.commit()
+        log.info(
+            "saved_messages_saved",
+            account_id=account_id,
+            record_id=record.id,
+            saved_msg_id=result.saved_message_id,
+            was_resent=result.was_resent,
+        )
+    except SavedMessagesForwardError as fwd_err:
+        log.error(
+            "saved_messages_failed",
+            account_id=account_id,
+            record_id=record.id,
+            error=str(fwd_err),
+        )
+        async with session_factory() as session:
+            capture_svc = MediaCaptureService(session)
+            await capture_svc.mark_failed(record, error=str(fwd_err))
+            await session.commit()
 
 
 async def _build_context(
@@ -141,8 +191,11 @@ async def _build_context(
     account_id: int,
     user_id: int,
     media_info,
-) -> CaptureContext:
+) -> tuple[CaptureContext, SenderInfo, ChatInfo]:
     """Extract all metadata from the Telethon event into a CaptureContext.
+
+    Returns (CaptureContext, SenderInfo, ChatInfo) so that the caller can
+    pass SenderInfo/ChatInfo to SavedMessagesService without re-fetching.
 
     Uses app.telegram.metadata for robust sender/chat extraction.
     All failures are caught — metadata errors must never block capture.
@@ -167,7 +220,7 @@ async def _build_context(
 
     sender_info = extract_sender(sender_obj)
 
-    return CaptureContext(
+    ctx = CaptureContext(
         telegram_account_id=account_id,
         user_id=user_id,
         source_chat_id=source_chat_id,
@@ -179,3 +232,4 @@ async def _build_context(
         sender_username=sender_info.username,
         sender_display_name=sender_info.display_name,
     )
+    return ctx, sender_info, chat_info
