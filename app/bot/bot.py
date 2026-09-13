@@ -43,8 +43,10 @@ def create_bot_app() -> Application:
         # It won't be able to run, but it can be constructed.
         token = "123456789:dummy-token-for-tests"
 
+    import os
+    os.makedirs("data", exist_ok=True)
     # Use PicklePersistence so conversation states survive bot restarts
-    persistence = PicklePersistence(filepath="bot_persistence.pickle")
+    persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
     
     application = (
         Application.builder()

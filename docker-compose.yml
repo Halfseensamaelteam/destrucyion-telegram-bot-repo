@@ -47,7 +47,7 @@ services:
         condition: service_started
     volumes:
       # Optional: bind mount the bot persistence for easy inspection/persistence across restarts
-      - bot_state:/app/bot_persistence.pickle
+      - bot_state:/app/data
     entrypoint: ["docker-entrypoint.sh"]
 
   worker:
@@ -71,7 +71,7 @@ services:
         condition: service_started
     volumes:
       # The worker needs to read the session files and potentially other things
-      - bot_state:/app/bot_persistence.pickle
+      - bot_state:/app/data
     entrypoint: ["docker-entrypoint.sh"]
 
 volumes:

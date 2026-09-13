@@ -53,15 +53,34 @@ async def test_heartbeat_refreshes_ttl(redis_client):
     assert token is not None
 
     # Refresh should succeed because we own it
-    redis_client.get.return_value = token
-    redis_client.pexpire.return_value = True
+    redis_client.eval.return_value = 1
     refreshed = await lock.refresh(account_id, token)
     assert refreshed is True
 
-    # After release, refresh should fail
-    redis_client.get.return_value = "other-token"
+    # After release or if stolen, refresh should fail
+    redis_client.eval.return_value = 0
     refreshed_after = await lock.refresh(account_id, token)
     assert refreshed_after is False
+
+@pytest.mark.asyncio
+async def test_heartbeat_fails_if_lock_stolen(redis_client):
+    """
+    Simulate race condition: lock expired and was acquired by another worker 
+    right before this worker tries to heartbeat/refresh.
+    """
+    lock = AccountLock(redis_client)
+    account_id = 200
+
+    redis_client.set.return_value = True
+    token = await lock.acquire(account_id)
+    assert token is not None
+
+    # Another worker stole the lock, so eval (check-and-pexpire) returns 0
+    redis_client.eval.return_value = 0
+    
+    # Refresh should fail immediately, NOT extending the new worker's lock
+    refreshed = await lock.refresh(account_id, token)
+    assert refreshed is False
 
 
 @pytest.mark.asyncio

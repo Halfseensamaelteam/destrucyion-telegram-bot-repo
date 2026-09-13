@@ -42,6 +42,15 @@ else
 end
 """
 
+# Lua script: expire key only if its value matches the owner token (atomic check-and-pexpire)
+_REFRESH_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("pexpire", KEYS[1], ARGV[2])
+else
+    return 0
+end
+"""
+
 
 def _lock_key(account_id: int) -> str:
     return f"worker:account:lock:{account_id}"
@@ -130,8 +139,8 @@ class AccountLock:
             return True
 
         key = _lock_key(account_id)
-        current = await self._redis.get(key)
-        if current != token:
+        result = await self._redis.eval(_REFRESH_SCRIPT, 1, key, token, LOCK_TTL_MS)
+        if not bool(result):
             log.warning(
                 "account_lock_heartbeat_lost",
                 account_id=account_id,
@@ -139,7 +148,6 @@ class AccountLock:
             )
             return False
 
-        await self._redis.pexpire(key, LOCK_TTL_MS)
         log.debug("account_lock_heartbeat_ok", account_id=account_id)
         return True
 
