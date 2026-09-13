@@ -39,10 +39,13 @@ def mock_session_factory():
 
 @pytest.fixture
 def manager(mock_session_factory, mock_cipher):
+    from worker.lock import AccountLock
+    dummy_lock = AccountLock(None)
     return TelegramClientManager(
         session_factory=mock_session_factory,
         cipher=mock_cipher,
         handler_factory=None,
+        account_lock=dummy_lock,
     )
 
 
@@ -117,7 +120,9 @@ async def test_start_account_success_launches_task(manager, monkeypatch):
     mock_client = AsyncMock()
     mock_client_class = MagicMock(return_value=mock_client)
     monkeypatch.setattr("telethon.TelegramClient", mock_client_class)
-    monkeypatch.setattr("telethon.sessions.StringSession", MagicMock())
+    
+    # Avoid ValueError from StringSession
+    manager._cipher.decrypt.return_value = ""
     
     # Mock settings
     mock_settings = MagicMock()

@@ -11,6 +11,7 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     filters,
+    PicklePersistence,
 )
 
 from app.core.config import get_settings
@@ -42,7 +43,15 @@ def create_bot_app() -> Application:
         # It won't be able to run, but it can be constructed.
         token = "123456789:dummy-token-for-tests"
 
-    application = Application.builder().token(token).build()
+    # Use PicklePersistence so conversation states survive bot restarts
+    persistence = PicklePersistence(filepath="bot_persistence.pickle")
+    
+    application = (
+        Application.builder()
+        .token(token)
+        .persistence(persistence)
+        .build()
+    )
 
     # Basic Commands
     application.add_handler(CommandHandler("start", start_command))
@@ -75,8 +84,8 @@ def create_bot_app() -> Application:
             ],
         },
         fallbacks=[CommandHandler("cancel", connect_cancel)],
-        # By default ConversationHandler uses in-memory DictPersistence.
-        # This will be upgraded to Redis in Phase 13.
+        name="connect_conversation",
+        persistent=True,
     )
     application.add_handler(connect_handler)
 

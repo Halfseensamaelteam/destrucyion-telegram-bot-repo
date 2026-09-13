@@ -60,6 +60,8 @@ class ManagedClient:
     last_error: str | None = None
     started_at: datetime | None = None
     task: asyncio.Task | None = None
+    lock_token: str | None = None
+    heartbeat_task: asyncio.Task | None = None
 
     def __repr__(self) -> str:
         return (
@@ -93,6 +95,7 @@ class TelegramClientManager:
         *,
         cipher: SessionCipher | None = None,
         handler_factory: EventHandlerFactory | None = None,
+        account_lock: object | None = None,  # AccountLock
     ) -> None:
         """
         Args:
@@ -107,6 +110,14 @@ class TelegramClientManager:
         self._session_factory = session_factory
         self._cipher = cipher or SessionCipher.from_settings()
         self._handler_factory = handler_factory
+        
+        # Load AccountLock. Fallback to singleton if not provided.
+        if account_lock is None:
+            from app.core.redis import get_redis_client
+            from worker.lock import AccountLock
+            account_lock = AccountLock(get_redis_client())
+        self._account_lock = account_lock
+
         self._clients: dict[int, ManagedClient] = {}  # keyed by account_id
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
@@ -213,6 +224,12 @@ class TelegramClientManager:
             )
             return
 
+        # Distributed lock — prevent multiple workers from starting the same account
+        lock_token = await self._account_lock.acquire(account_id)
+        if not lock_token:
+            # Another worker owns this account; skip it silently
+            return
+
         if not account.session_ciphertext:
             log.warning(
                 "client_skipped_no_session",
@@ -249,6 +266,13 @@ class TelegramClientManager:
             user_id=account.user_id,
             state=ClientState.STARTING,
             client=client,
+            lock_token=lock_token,
+        )
+
+        # Launch heartbeat task
+        managed.heartbeat_task = asyncio.create_task(
+            self._account_lock.heartbeat(account_id, lock_token),
+            name=f"heartbeat-{account_id}",
         )
 
         async with self._lock:
@@ -297,7 +321,18 @@ class TelegramClientManager:
                 await self._persist_connected(account_id)
 
                 # Keep alive until the client disconnects or stop is requested
-                await managed.client.run_until_disconnected()
+                # Also abort if the heartbeat task exits (which means we lost the lock)
+                client_task = asyncio.create_task(managed.client.run_until_disconnected())
+                done, pending = await asyncio.wait(
+                    [client_task, managed.heartbeat_task],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+
+                if managed.heartbeat_task in done:
+                    # Heartbeat exited -> lock was lost
+                    log.error("client_lock_lost", account_id=account_id)
+                    client_task.cancel()
+                    break
 
             except asyncio.CancelledError:
                 log.info("client_cancelled", account_id=account_id)
@@ -358,11 +393,22 @@ class TelegramClientManager:
             except (asyncio.CancelledError, Exception):
                 pass
 
+        if managed.heartbeat_task and not managed.heartbeat_task.done():
+            managed.heartbeat_task.cancel()
+            try:
+                await managed.heartbeat_task
+            except (asyncio.CancelledError, Exception):
+                pass
+
         try:
             if managed.client:
                 await managed.client.disconnect()
         except Exception:
             pass
+
+        if managed.lock_token:
+            await self._account_lock.release(account_id, managed.lock_token)
+            managed.lock_token = None
 
         managed.state = ClientState.STOPPED
         log.info("client_disconnected_cleanly", account_id=account_id)

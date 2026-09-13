@@ -44,7 +44,8 @@ reading both.
 | Phase 10 — Idempotency & Recovery | ✅ PASS | `RecoveryService`, DB state |
 | Phase 11 — Telegram Bot | ✅ PASS | Command Handlers (`ptb`) |
 | Phase 12 — FastAPI | ✅ PASS | REST API, API Keys, Isolation |
-| Phase 13–18 | ⏳ Pending | — |
+| Phase 13 — Redis & Distributed Coordination | ✅ PASS | Distributed Locking |
+| Phase 14–18 | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 
