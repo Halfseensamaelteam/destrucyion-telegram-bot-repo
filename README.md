@@ -45,7 +45,8 @@ reading both.
 | Phase 11 — Telegram Bot | ✅ PASS | Command Handlers (`ptb`) |
 | Phase 12 — FastAPI | ✅ PASS | REST API, API Keys, Isolation |
 | Phase 13 — Redis & Distributed Coordination | ✅ PASS | Distributed Locking |
-| Phase 14–18 | ⏳ Pending | — |
+| Phase 14 — Docker | ✅ PASS | `Dockerfile`, `docker-compose.yml` |
+| Phase 15–18 | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 
