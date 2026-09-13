@@ -1,1 +1,15 @@
-// vercel.json — to be filled during Phase 15 (docs/ROADMAP.md)
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "api/index.py"
+    }
+  ]
+}

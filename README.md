@@ -46,7 +46,8 @@ reading both.
 | Phase 12 — FastAPI | ✅ PASS | REST API, API Keys, Isolation |
 | Phase 13 — Redis & Distributed Coordination | ✅ PASS | Distributed Locking |
 | Phase 14 — Docker | ✅ PASS | `Dockerfile`, `docker-compose.yml` |
-| Phase 15–18 | ⏳ Pending | — |
+| Phase 15 — Vercel | ✅ PASS | `vercel.json`, `api/index.py` |
+| Phase 16–18 | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 
