@@ -47,7 +47,8 @@ reading both.
 | Phase 13 — Redis & Distributed Coordination | ✅ PASS | Distributed Locking |
 | Phase 14 — Docker | ✅ PASS | `Dockerfile`, `docker-compose.yml` |
 | Phase 15 — Vercel | ✅ PASS | `vercel.json`, `api/index.py` |
-| Phase 16–18 | ⏳ Pending | — |
+| Phase 16 — Persistent Worker | ✅ PASS | `docs/DEPLOYMENT.md` |
+| Phase 17–18 | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 
