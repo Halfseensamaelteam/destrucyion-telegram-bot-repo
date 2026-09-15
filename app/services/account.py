@@ -29,6 +29,7 @@ from telethon.errors import (
     PhoneCodeExpiredError,
     PhoneCodeInvalidError,
     SessionPasswordNeededError,
+    RPCError,
 )
 from telethon.sessions import StringSession
 
@@ -224,22 +225,28 @@ class AccountService:
         try:
             await client.connect()
 
-            try:
-                await client.sign_in(
-                    phone=phone_number,
-                    code=code,
-                    phone_code_hash=phone_code_hash,
-                )
-            except SessionPasswordNeededError:
-                if not password:
+            # If password is provided, skip code sign-in and go directly to password sign-in
+            # This avoids "code previously shared" error when retrying with 2FA
+            if password:
+                await client.sign_in(password=password)
+            else:
+                try:
+                    await client.sign_in(
+                        phone=phone_number,
+                        code=code,
+                        phone_code_hash=phone_code_hash,
+                    )
+                except SessionPasswordNeededError:
                     raise AuthError(
                         "2FA is enabled on this account. A cloud password is required."
                     )
-                await client.sign_in(password=password)
-            except PhoneCodeInvalidError:
-                raise AuthError("The login code is incorrect.")
-            except PhoneCodeExpiredError:
-                raise AuthError("The login code has expired. Please request a new one.")
+                except PhoneCodeInvalidError:
+                    raise AuthError("The login code is incorrect.")
+                except PhoneCodeExpiredError:
+                    raise AuthError("The login code has expired. Please request a new one.")
+                except RPCError as e:
+                    # Catch all other Telegram RPC errors and surface them
+                    raise AuthError(f"Telegram authentication error: {e}") from e
 
             # --- Serialize session ---
             # SECURITY: This is the only place the raw session string is used.

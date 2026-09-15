@@ -175,16 +175,10 @@ async def test_verify_code_2fa(
     mock_me.id = 111
     mock_me.username = "twofa_user"
 
-    call_count = {"n": 0}
-
-    async def sign_in_side_effect(**kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise SessionPasswordNeededError(request=None)
-
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
-    mock_client.sign_in = AsyncMock(side_effect=sign_in_side_effect)
+    # When password is provided, sign_in should be called directly with password
+    mock_client.sign_in = AsyncMock()
     mock_client.get_me = AsyncMock(return_value=mock_me)
     mock_client.disconnect = AsyncMock()
     mock_client.session = mock_session
@@ -196,8 +190,8 @@ async def test_verify_code_2fa(
         )
 
     assert updated.status == TelegramAccountStatus.ACTIVE
-    # Verify password sign_in was called
-    assert call_count["n"] == 2
+    # Verify password sign_in was called directly (no code sign-in attempt)
+    mock_client.sign_in.assert_called_once_with(password="mypassword")
     get_settings.cache_clear()
 
 
