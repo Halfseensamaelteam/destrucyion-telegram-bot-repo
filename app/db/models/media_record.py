@@ -84,7 +84,12 @@ class MediaRecord(Base):
 
     # Media metadata
     media_type: Mapped[MediaType] = mapped_column(
-        Enum(MediaType, name="mediatype"), nullable=False
+        Enum(
+            MediaType,
+            name="mediatype",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
+        nullable=False,
     )
     ttl_seconds: Mapped[int | None] = mapped_column(
         Integer, nullable=True,
@@ -97,7 +102,11 @@ class MediaRecord(Base):
         comment="Message ID in the account's Saved Messages after forwarding",
     )
     status: Mapped[MediaRecordStatus] = mapped_column(
-        Enum(MediaRecordStatus, name="mediarecordstatus"),
+        Enum(
+            MediaRecordStatus,
+            name="mediarecordstatus",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
         default=MediaRecordStatus.PENDING,
         nullable=False,
         index=True,

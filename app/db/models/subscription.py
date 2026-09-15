@@ -50,7 +50,12 @@ class Subscription(Base):
         index=True,
     )
     plan: Mapped[SubscriptionPlan] = mapped_column(
-        Enum(SubscriptionPlan, name="subscriptionplan"), nullable=False
+        Enum(
+            SubscriptionPlan,
+            name="subscriptionplan",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
+        nullable=False,
     )
     starts_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
@@ -60,7 +65,11 @@ class Subscription(Base):
         comment="NULL for lifetime plan",
     )
     status: Mapped[SubscriptionStatus] = mapped_column(
-        Enum(SubscriptionStatus, name="subscriptionstatus"),
+        Enum(
+            SubscriptionStatus,
+            name="subscriptionstatus",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
         default=SubscriptionStatus.ACTIVE,
         nullable=False,
     )

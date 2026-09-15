@@ -48,7 +48,11 @@ class TelegramAccount(Base):
         comment="Fernet-encrypted Telethon StringSession — NEVER log or expose",
     )
     status: Mapped[TelegramAccountStatus] = mapped_column(
-        Enum(TelegramAccountStatus, name="telegramaccountstatus"),
+        Enum(
+            TelegramAccountStatus,
+            name="telegramaccountstatus",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+        ),
         default=TelegramAccountStatus.DISCONNECTED,
         nullable=False,
     )
