@@ -337,8 +337,20 @@ class TelegramClientManager:
             except asyncio.CancelledError:
                 log.info("client_cancelled", account_id=account_id)
                 break
-
+                
             except Exception as exc:
+                # Handle specific Telethon errors
+                if type(exc).__name__ == "AuthKeyUnregisteredError":
+                    log.error(
+                        "client_session_revoked",
+                        account_id=account_id,
+                        msg="User terminated the session from another device.",
+                    )
+                    managed.state = ClientState.ERROR
+                    managed.last_error = "Session revoked by user."
+                    await self._persist_error(account_id, managed.last_error)
+                    return
+                
                 managed.last_error = str(exc)
                 log.warning(
                     "client_disconnected",

@@ -48,7 +48,8 @@ reading both.
 | Phase 14 — Docker | ✅ PASS | `Dockerfile`, `docker-compose.yml` |
 | Phase 15 — Vercel | ✅ PASS | `vercel.json`, `api/index.py` |
 | Phase 16 — Persistent Worker | ✅ PASS | `docs/DEPLOYMENT.md` |
-| Phase 17–18 | ⏳ Pending | — |
+| Phase 17 — Production Hardening | ✅ PASS | Audit logs, DB/Redis recovery, security review |
+| Phase 18 — Final Trial | ⏳ Pending | — |
 
 ## Tech Stack (planned)
 

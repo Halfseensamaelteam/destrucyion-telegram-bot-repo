@@ -4,6 +4,7 @@ app.db.models
 All ORM model exports. Import models here to ensure Alembic detects them.
 """
 
+from app.db.models.audit_log import AuditAction, AuditLog
 from app.db.models.base import Base
 from app.db.models.media_record import MediaRecord, MediaRecordStatus, MediaType
 from app.db.models.subscription import Subscription, SubscriptionPlan, SubscriptionStatus
@@ -21,4 +22,6 @@ __all__ = [
     "MediaRecord",
     "MediaRecordStatus",
     "MediaType",
+    "AuditLog",
+    "AuditAction",
 ]

@@ -24,6 +24,8 @@ Design:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from dataclasses import dataclass
 
 from app.core.logging import get_logger
@@ -53,6 +55,33 @@ class ForwardResult:
     saved_message_id: int
     caption_used: str
     was_resent: bool
+
+
+class SavedMessagesForwardError(Exception):
+    """Raised when the message cannot be forwarded to Saved Messages."""
+
+
+def with_flood_wait_retry(max_retries: int = 3):
+    """Decorator to retry Telethon functions if they hit a FloodWaitError."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            from telethon.errors import FloodWaitError
+            for attempt in range(max_retries + 1):
+                try:
+                    return await func(*args, **kwargs)
+                except FloodWaitError as e:
+                    if attempt == max_retries:
+                        raise
+                    log.warning(
+                        "flood_wait_encountered",
+                        seconds=e.seconds,
+                        attempt=attempt + 1,
+                        msg="Sleeping before retry...",
+                    )
+                    await asyncio.sleep(e.seconds)
+        return wrapper
+    return decorator
 
 
 class SavedMessagesService:
@@ -152,6 +181,7 @@ class SavedMessagesService:
                 f"All forwarding strategies failed: {resend_exc}"
             ) from resend_exc
 
+    @with_flood_wait_retry(max_retries=3)
     async def _try_forward(self, source_message, caption: str) -> ForwardResult:
         """Attempt to forward the message to Saved Messages and pin the caption."""
         from telethon.tl.types import InputPeerSelf
@@ -180,6 +210,7 @@ class SavedMessagesService:
             was_resent=False,
         )
 
+    @with_flood_wait_retry(max_retries=3)
     async def _try_resend(self, source_message, caption: str) -> ForwardResult:
         """Send media by file reference when forward is unavailable.
 

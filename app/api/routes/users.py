@@ -7,7 +7,7 @@ GET  /api/v1/me            → current user profile
 POST /api/v1/me/apikey     → rotate API key (returns raw key once)
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app.api.deps import CurrentUser, DbSession
 from app.api.schemas import UserSchema, ApiKeySchema
@@ -23,13 +23,22 @@ async def get_me(current_user: CurrentUser) -> UserSchema:
 
 
 @router.post("/me/apikey", response_model=ApiKeySchema)
-async def rotate_api_key(current_user: CurrentUser, session: DbSession) -> ApiKeySchema:
+async def rotate_api_key(
+    request: Request, current_user: CurrentUser, session: DbSession
+) -> ApiKeySchema:
     """Rotate the API key for the authenticated user.
 
     The returned key is the ONLY time it will be visible.
     Store it securely — it cannot be retrieved again.
     """
     svc = ApiKeyService(session)
+    
+    # Apply rate limiter directly by reaching into app.state
+    # This avoids circular dependencies with main.py
+    limiter = request.app.state.limiter
+    # Manually check rate limit instead of decorator to ensure we only apply it to valid users
+    limiter.limit("1/minute")(lambda request: None)(request)
+
     raw_key = await svc.rotate(current_user)
     await session.commit()
     return ApiKeySchema(api_key=raw_key)

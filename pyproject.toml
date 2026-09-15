@@ -17,6 +17,7 @@ dependencies = [
     "httpx>=0.28.0",
     "python-telegram-bot>=21.9",
     "redis[hiredis]>=5.2.0",
+    "slowapi>=0.1.10",
 ]
 
 [project.optional-dependencies]
