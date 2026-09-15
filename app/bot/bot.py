@@ -92,3 +92,21 @@ def create_bot_app() -> Application:
     application.add_handler(connect_handler)
 
     return application
+
+
+async def setup_webhook(application: Application, webhook_url: str) -> None:
+    """Set up the Telegram bot webhook.
+    
+    Phase 18: Configure webhook for Vercel deployment.
+    """
+    await application.bot.set_webhook(url=webhook_url)
+    print(f"Webhook set to: {webhook_url}")
+
+
+async def delete_webhook(application: Application) -> None:
+    """Delete the Telegram bot webhook.
+    
+    Phase 18: Clean up webhook when switching to long polling.
+    """
+    await application.bot.delete_webhook()
+    print("Webhook deleted")

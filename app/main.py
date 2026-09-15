@@ -24,6 +24,9 @@ from app.core.logging import configure_logging, get_logger
 from app.core.redis import check_redis_health, get_redis_client
 from app.db.session import _get_engine, check_db_health
 
+# Phase 18: Bot webhook integration
+_bot_app = None
+
 settings = get_settings()
 configure_logging(settings.log_level)
 log = get_logger(__name__)
@@ -149,6 +152,49 @@ def create_app() -> FastAPI:
                 },
             }
         )
+
+    # Phase 18: Telegram Bot Webhook endpoint
+    @application.post("/webhook/telegram", tags=["bot"])
+    async def telegram_webhook(request: Request) -> JSONResponse:
+        """Receive Telegram Bot updates via webhook.
+        
+        Phase 18: Webhook mode for Vercel deployment.
+        Long polling is NOT supported on Vercel (serverless).
+        """
+        global _bot_app
+        
+        # Lazy load bot app
+        if _bot_app is None:
+            from app.bot.bot import create_bot_app
+            _bot_app = create_bot_app()
+            # Initialize the bot app (needed for webhook mode)
+            await _bot_app.initialize()
+            log.info("bot_webhook_loaded")
+        
+        # Get update from request body
+        import json
+        try:
+            body = await request.body()
+            update_data = json.loads(body.decode())
+        except json.JSONDecodeError:
+            log.warning("bot_webhook_invalid_json")
+            return JSONResponse(status_code=400, content={"status": "error", "message": "Invalid JSON"})
+        
+        # Validate update has required fields
+        if not update_data or "update_id" not in update_data:
+            log.warning("bot_webhook_invalid_update", update_data=update_data)
+            return JSONResponse(status_code=200, content={"status": "ok"})
+        
+        # Process update through bot application
+        try:
+            from telegram import Update
+            update = Update.de_json(update_data, _bot_app.bot)
+            await _bot_app.process_update(update)
+        except Exception as exc:
+            log.error("bot_webhook_processing_error", error=str(exc))
+            # Still return 200 to avoid Telegram retrying
+        
+        return JSONResponse(status_code=200, content={"status": "ok"})
 
     # Phase 12: REST API routers
     from app.api.routes import users, telegram, subscriptions, media, admin

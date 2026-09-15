@@ -29,8 +29,16 @@ class TestSettingsDefaults:
         assert s.is_development is True
         assert s.is_production is False
 
-    def test_default_telegram_api_id_is_zero(self):
-        s = Settings()
+    def test_default_telegram_api_id_is_zero(self, monkeypatch):
+        # This test needs to verify default value when TELEGRAM_API_ID is not set
+        # Clear any existing TELEGRAM_API_ID from environment AND .env file
+        monkeypatch.delenv("TELEGRAM_API_ID", raising=False)
+        # Clear the Settings cache to get a fresh instance
+        get_settings.cache_clear()
+        # Create Settings instance with explicit override to ensure no .env loading
+        from pydantic_settings import BaseSettings
+        # Temporarily disable .env loading for this test
+        s = Settings(_env_file=None)
         assert s.telegram_api_id == 0
 
 
