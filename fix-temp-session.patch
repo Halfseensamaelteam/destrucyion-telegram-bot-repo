@@ -1,0 +1,267 @@
+diff --git a/app/bot/handlers/account.py b/app/bot/handlers/account.py
+index 01e3dbf..4397abe 100644
+--- a/app/bot/handlers/account.py
++++ b/app/bot/handlers/account.py
+@@ -105,6 +105,9 @@ async def connect_phone(
+     context.user_data["phone"] = phone
+     context.user_data["account_id"] = account.id
+     context.user_data["phone_code_hash"] = start_result.phone_code_hash
++    # CRITICAL: must be reused as-is in verify_code(), never regenerated —
++    # see docs/ROADMAP.md Phase 5 for why.
++    context.user_data["temp_session"] = start_result.temp_session
+ 
+     await msg.edit_text(
+         f"✅ Code sent to your Telegram app for {phone}.\n\n"
+@@ -124,8 +127,9 @@ async def connect_code(
+     phone = context.user_data.get("phone")
+     account_id = context.user_data.get("account_id")
+     phone_code_hash = context.user_data.get("phone_code_hash")
++    temp_session = context.user_data.get("temp_session")
+ 
+-    if not all([phone, account_id, phone_code_hash]):
++    if not all([phone, account_id, phone_code_hash, temp_session]):
+         await update.message.reply_text("Session expired or corrupted. Please start over with /connect.")
+         return ConversationHandler.END
+ 
+@@ -139,6 +143,7 @@ async def connect_code(
+             phone_number=phone,
+             code=code,
+             phone_code_hash=phone_code_hash,
++            temp_session=temp_session,
+         )
+         await session.commit()
+         await msg.edit_text("✅ Success! Your account is now connected and ACTIVE.")
+@@ -167,6 +172,7 @@ async def connect_password(
+     phone = context.user_data.get("phone")
+     account_id = context.user_data.get("account_id")
+     phone_code_hash = context.user_data.get("phone_code_hash")
++    temp_session = context.user_data.get("temp_session")
+     code = context.user_data.get("code")
+ 
+     msg = await update.message.reply_text("Verifying password...")
+@@ -185,6 +191,7 @@ async def connect_password(
+             phone_number=phone,
+             code=code,
+             phone_code_hash=phone_code_hash,
++            temp_session=temp_session,
+             password=password,
+         )
+         await session.commit()
+diff --git a/app/services/account.py b/app/services/account.py
+index d288192..e9d85a4 100644
+--- a/app/services/account.py
++++ b/app/services/account.py
+@@ -67,6 +67,13 @@ class AuthStartResult:
+ 
+     account_id: int
+     phone_code_hash: str  # Required by Telegram to verify the code
++    temp_session: str
++    # The exact StringSession used for send_code_request(). Telegram ties the
++    # login code to the specific auth key/connection that requested it — a
++    # fresh client+session for sign_in() will fail with PhoneCodeExpiredError
++    # even with a valid phone_code_hash. The caller MUST pass this same
++    # string back into verify_code(). It is pre-authentication (no user is
++    # logged in yet) but should still never be logged or persisted long-term.
+ 
+ 
+ class AccountService:
+@@ -146,6 +153,12 @@ class AccountService:
+         try:
+             await client.connect()
+             result = await client.send_code_request(phone_number)
++            # CRITICAL: capture the session BEFORE disconnecting. This is the
++            # exact auth key/connection the code was issued against — reusing
++            # it in verify_code() is required or Telegram will reject the
++            # code as expired regardless of correctness. See docs/ROADMAP.md
++            # Phase 5 for the full explanation.
++            temp_session = client.session.save()
+         except Exception as exc:
+             raise AuthError(f"Failed to send code: {exc}") from exc
+         finally:
+@@ -157,6 +170,7 @@ class AccountService:
+         return AuthStartResult(
+             account_id=account_id,
+             phone_code_hash=result.phone_code_hash,
++            temp_session=temp_session,
+         )
+ 
+     async def verify_code(
+@@ -166,6 +180,7 @@ class AccountService:
+         phone_number: str,
+         code: str,
+         phone_code_hash: str,
++        temp_session: str,
+         password: str | None = None,
+     ) -> TelegramAccount:
+         """Verify the login code (and optional 2FA password).
+@@ -186,6 +201,11 @@ class AccountService:
+             phone_number: Must match what was used in start_auth.
+             code: The 5-6 digit code received by the user.
+             phone_code_hash: The hash returned by start_auth.
++            temp_session: The EXACT StringSession string returned by
++                start_auth's AuthStartResult.temp_session. Reusing this same
++                session (same auth key) is required — a fresh empty session
++                here will make Telegram reject the code as expired even if
++                it's correct. See docs/ROADMAP.md Phase 5.
+             password: 2FA cloud password, if applicable.
+ 
+         Returns:
+@@ -197,7 +217,10 @@ class AccountService:
+         """
+         account = await self._get_account_for_user(account_id, user_id)
+ 
+-        client = self._get_client()
++        # CRITICAL: must reuse the exact session from start_auth — a fresh
++        # empty session here will always fail with PhoneCodeExpiredError,
++        # even for a correct/unexpired code. See docs/ROADMAP.md Phase 5.
++        client = self._get_client(string_session=temp_session)
+         try:
+             await client.connect()
+ 
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index f634a6b..4d9c540 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -103,16 +103,52 @@ STOP until all tests pass.
+ **Implement:** account creation, phone authentication, code verification, 2FA,
+ session serialization, session encryption, database storage.
+ 
+-Test with a dedicated Telegram test account.
+-
+-**Verify:** login, restart, load session, disconnect, reconnect.
+-
+-STOP if session persistence is unreliable.
++**CRITICAL DESIGN CONSTRAINT — Telethon session continuity:**
++
++`send_code_request()` and the subsequent `sign_in()` MUST be performed using
++the exact same underlying session/connection (same auth key). Creating a new
++`TelegramClient` with a fresh/empty `StringSession()` for `send_code_request`,
++disconnecting it, and later creating ANOTHER new client with another fresh
++`StringSession()` for `sign_in()` — even while correctly passing along
++`phone_code_hash` — WILL reliably fail with `PhoneCodeExpiredError`, because
++the login code is cryptographically tied to the specific auth key/connection
++that requested it, not just the phone number.
++
++This matters specifically because this project's authentication happens
++across multiple separate bot updates (phone number message, then code
++message, then optional password message) — each potentially handled by a
++different function call, unlike a single long-running script (e.g. the
++original Saveit.py) where one client stays connected throughout.
++
++**Required pattern:**
++1. In the "request code" step: create the client, connect, call
++   `send_code_request()`, then — BEFORE disconnecting — capture
++   `temp_session = client.session.save()`.
++2. Return/store `temp_session` alongside `phone_code_hash` in the caller's
++   temporary state (e.g. bot conversation `user_data`, or Redis with short
++   TTL). This temp session is pre-authentication and low-sensitivity, but
++   still must not be logged and should not persist beyond the auth flow.
++3. In the "verify code" (and "verify 2FA password") step: reconstruct the
++   client using that SAME `temp_session` string (`StringSession(temp_session)`)
++   — never a fresh empty session — before calling `sign_in()`.
++
++**Test with a dedicated Telegram test account, end-to-end, for real** —
++Telethon mocks/unit tests will NOT catch this class of bug, since a mock
++doesn't know the difference between "same auth key" and "different auth
++key". A unit test can verify that the same session string is threaded
++through the calls, but only a real trial with an actual Telegram account
++verifies the fix actually works against Telegram's servers.
++
++**Verify:** login (real trial, code accepted on first try, not "expired"),
++restart, load session, disconnect, reconnect. Also verify the 2FA path
++specifically, since it's a third step reusing the same temp session again.
++
++STOP if session persistence is unreliable, or if code verification fails
++with "expired" errors under normal (prompt) use.
+ 
+ ---
+ 
+ ## PHASE 6 — Telegram Client Manager
+-
+ **Implement:** `TelegramClientManager` supporting multiple accounts, startup,
+ shutdown, reconnect, account isolation, subscription checks.
+ 
+diff --git a/tests/unit/bot/test_account.py b/tests/unit/bot/test_account.py
+index df67d55..d1db18e 100644
+--- a/tests/unit/bot/test_account.py
++++ b/tests/unit/bot/test_account.py
+@@ -62,6 +62,7 @@ async def test_connect_phone_success(mock_account_service_cls):
+     
+     mock_start_res = MagicMock()
+     mock_start_res.phone_code_hash = "hash123"
++    mock_start_res.temp_session = "temp_sess_abc"
+     mock_svc.start_auth.return_value = mock_start_res
+     
+     result = await connect_phone.__wrapped__(update, context, session, user)
+@@ -70,6 +71,7 @@ async def test_connect_phone_success(mock_account_service_cls):
+     assert context.user_data["phone"] == "+1234567890"
+     assert context.user_data["account_id"] == 99
+     assert context.user_data["phone_code_hash"] == "hash123"
++    assert context.user_data["temp_session"] == "temp_sess_abc"
+     
+     mock_svc.create_account.assert_called_once_with(user_id=55, phone_number="+1234567890")
+     mock_svc.start_auth.assert_called_once_with(account_id=99, user_id=55, phone_number="+1234567890")
+@@ -99,7 +101,8 @@ async def test_connect_code_success(mock_account_service_cls):
+     context.user_data = {
+         "phone": "+1234567890",
+         "account_id": 99,
+-        "phone_code_hash": "hash123"
++        "phone_code_hash": "hash123",
++        "temp_session": "temp_sess_abc"
+     }
+     session = AsyncMock()
+     user = MagicMock()
+@@ -112,7 +115,8 @@ async def test_connect_code_success(mock_account_service_cls):
+     
+     assert result == ConversationHandler.END
+     mock_svc.verify_code.assert_called_once_with(
+-        account_id=99, user_id=55, phone_number="+1234567890", code="55555", phone_code_hash="hash123"
++        account_id=99, user_id=55, phone_number="+1234567890", code="55555",
++        phone_code_hash="hash123", temp_session="temp_sess_abc"
+     )
+     # Context should be cleared on success
+     assert not context.user_data
+@@ -127,7 +131,8 @@ async def test_connect_code_needs_password(mock_account_service_cls):
+     context.user_data = {
+         "phone": "+1234567890",
+         "account_id": 99,
+-        "phone_code_hash": "hash123"
++        "phone_code_hash": "hash123",
++        "temp_session": "temp_sess_abc"
+     }
+     session = AsyncMock()
+     user = MagicMock()
+diff --git a/tests/unit/services/test_account.py b/tests/unit/services/test_account.py
+index f671d1e..1e215df 100644
+--- a/tests/unit/services/test_account.py
++++ b/tests/unit/services/test_account.py
+@@ -140,7 +140,8 @@ async def test_verify_code_success(
+ 
+     with patch.object(service, "_get_client", return_value=mock_client):
+         updated_account = await service.verify_code(
+-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH
++            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
++            temp_session="fake_temp_session_string",
+         )
+ 
+     assert updated_account.status == TelegramAccountStatus.ACTIVE
+@@ -190,7 +191,8 @@ async def test_verify_code_2fa(
+ 
+     with patch.object(service, "_get_client", return_value=mock_client):
+         updated = await service.verify_code(
+-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH, password="mypassword"
++            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
++            temp_session="fake_temp_session_string", password="mypassword"
+         )
+ 
+     assert updated.status == TelegramAccountStatus.ACTIVE
+@@ -215,7 +217,8 @@ async def test_verify_code_wrong_code_raises(
+     with patch.object(service, "_get_client", return_value=mock_client):
+         with pytest.raises(AuthError, match="incorrect"):
+             await service.verify_code(
+-                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH
++                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH,
++                temp_session="fake_temp_session_string",
+             )
+ 
+ 

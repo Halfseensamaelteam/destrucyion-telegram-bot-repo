@@ -105,6 +105,9 @@ async def connect_phone(
     context.user_data["phone"] = phone
     context.user_data["account_id"] = account.id
     context.user_data["phone_code_hash"] = start_result.phone_code_hash
+    # CRITICAL: must be reused as-is in verify_code(), never regenerated —
+    # see docs/ROADMAP.md Phase 5 for why.
+    context.user_data["temp_session"] = start_result.temp_session
 
     await msg.edit_text(
         f"✅ Code sent to your Telegram app for {phone}.\n\n"
@@ -124,8 +127,9 @@ async def connect_code(
     phone = context.user_data.get("phone")
     account_id = context.user_data.get("account_id")
     phone_code_hash = context.user_data.get("phone_code_hash")
+    temp_session = context.user_data.get("temp_session")
 
-    if not all([phone, account_id, phone_code_hash]):
+    if not all([phone, account_id, phone_code_hash, temp_session]):
         await update.message.reply_text("Session expired or corrupted. Please start over with /connect.")
         return ConversationHandler.END
 
@@ -139,6 +143,7 @@ async def connect_code(
             phone_number=phone,
             code=code,
             phone_code_hash=phone_code_hash,
+            temp_session=temp_session,
         )
         await session.commit()
         await msg.edit_text("✅ Success! Your account is now connected and ACTIVE.")
@@ -167,6 +172,7 @@ async def connect_password(
     phone = context.user_data.get("phone")
     account_id = context.user_data.get("account_id")
     phone_code_hash = context.user_data.get("phone_code_hash")
+    temp_session = context.user_data.get("temp_session")
     code = context.user_data.get("code")
 
     msg = await update.message.reply_text("Verifying password...")
@@ -185,6 +191,7 @@ async def connect_password(
             phone_number=phone,
             code=code,
             phone_code_hash=phone_code_hash,
+            temp_session=temp_session,
             password=password,
         )
         await session.commit()

@@ -103,16 +103,52 @@ STOP until all tests pass.
 **Implement:** account creation, phone authentication, code verification, 2FA,
 session serialization, session encryption, database storage.
 
-Test with a dedicated Telegram test account.
+**CRITICAL DESIGN CONSTRAINT — Telethon session continuity:**
 
-**Verify:** login, restart, load session, disconnect, reconnect.
+`send_code_request()` and the subsequent `sign_in()` MUST be performed using
+the exact same underlying session/connection (same auth key). Creating a new
+`TelegramClient` with a fresh/empty `StringSession()` for `send_code_request`,
+disconnecting it, and later creating ANOTHER new client with another fresh
+`StringSession()` for `sign_in()` — even while correctly passing along
+`phone_code_hash` — WILL reliably fail with `PhoneCodeExpiredError`, because
+the login code is cryptographically tied to the specific auth key/connection
+that requested it, not just the phone number.
 
-STOP if session persistence is unreliable.
+This matters specifically because this project's authentication happens
+across multiple separate bot updates (phone number message, then code
+message, then optional password message) — each potentially handled by a
+different function call, unlike a single long-running script (e.g. the
+original Saveit.py) where one client stays connected throughout.
+
+**Required pattern:**
+1. In the "request code" step: create the client, connect, call
+   `send_code_request()`, then — BEFORE disconnecting — capture
+   `temp_session = client.session.save()`.
+2. Return/store `temp_session` alongside `phone_code_hash` in the caller's
+   temporary state (e.g. bot conversation `user_data`, or Redis with short
+   TTL). This temp session is pre-authentication and low-sensitivity, but
+   still must not be logged and should not persist beyond the auth flow.
+3. In the "verify code" (and "verify 2FA password") step: reconstruct the
+   client using that SAME `temp_session` string (`StringSession(temp_session)`)
+   — never a fresh empty session — before calling `sign_in()`.
+
+**Test with a dedicated Telegram test account, end-to-end, for real** —
+Telethon mocks/unit tests will NOT catch this class of bug, since a mock
+doesn't know the difference between "same auth key" and "different auth
+key". A unit test can verify that the same session string is threaded
+through the calls, but only a real trial with an actual Telegram account
+verifies the fix actually works against Telegram's servers.
+
+**Verify:** login (real trial, code accepted on first try, not "expired"),
+restart, load session, disconnect, reconnect. Also verify the 2FA path
+specifically, since it's a third step reusing the same temp session again.
+
+STOP if session persistence is unreliable, or if code verification fails
+with "expired" errors under normal (prompt) use.
 
 ---
 
 ## PHASE 6 — Telegram Client Manager
-
 **Implement:** `TelegramClientManager` supporting multiple accounts, startup,
 shutdown, reconnect, account isolation, subscription checks.
 

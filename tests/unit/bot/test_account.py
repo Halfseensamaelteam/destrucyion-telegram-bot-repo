@@ -62,6 +62,7 @@ async def test_connect_phone_success(mock_account_service_cls):
     
     mock_start_res = MagicMock()
     mock_start_res.phone_code_hash = "hash123"
+    mock_start_res.temp_session = "temp_sess_abc"
     mock_svc.start_auth.return_value = mock_start_res
     
     result = await connect_phone.__wrapped__(update, context, session, user)
@@ -70,6 +71,7 @@ async def test_connect_phone_success(mock_account_service_cls):
     assert context.user_data["phone"] == "+1234567890"
     assert context.user_data["account_id"] == 99
     assert context.user_data["phone_code_hash"] == "hash123"
+    assert context.user_data["temp_session"] == "temp_sess_abc"
     
     mock_svc.create_account.assert_called_once_with(user_id=55, phone_number="+1234567890")
     mock_svc.start_auth.assert_called_once_with(account_id=99, user_id=55, phone_number="+1234567890")
@@ -99,7 +101,8 @@ async def test_connect_code_success(mock_account_service_cls):
     context.user_data = {
         "phone": "+1234567890",
         "account_id": 99,
-        "phone_code_hash": "hash123"
+        "phone_code_hash": "hash123",
+        "temp_session": "temp_sess_abc"
     }
     session = AsyncMock()
     user = MagicMock()
@@ -112,7 +115,8 @@ async def test_connect_code_success(mock_account_service_cls):
     
     assert result == ConversationHandler.END
     mock_svc.verify_code.assert_called_once_with(
-        account_id=99, user_id=55, phone_number="+1234567890", code="55555", phone_code_hash="hash123"
+        account_id=99, user_id=55, phone_number="+1234567890", code="55555",
+        phone_code_hash="hash123", temp_session="temp_sess_abc"
     )
     # Context should be cleared on success
     assert not context.user_data
@@ -127,7 +131,8 @@ async def test_connect_code_needs_password(mock_account_service_cls):
     context.user_data = {
         "phone": "+1234567890",
         "account_id": 99,
-        "phone_code_hash": "hash123"
+        "phone_code_hash": "hash123",
+        "temp_session": "temp_sess_abc"
     }
     session = AsyncMock()
     user = MagicMock()

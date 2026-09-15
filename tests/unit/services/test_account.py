@@ -140,7 +140,8 @@ async def test_verify_code_success(
 
     with patch.object(service, "_get_client", return_value=mock_client):
         updated_account = await service.verify_code(
-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH
+            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
+            temp_session="fake_temp_session_string",
         )
 
     assert updated_account.status == TelegramAccountStatus.ACTIVE
@@ -190,7 +191,8 @@ async def test_verify_code_2fa(
 
     with patch.object(service, "_get_client", return_value=mock_client):
         updated = await service.verify_code(
-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH, password="mypassword"
+            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
+            temp_session="fake_temp_session_string", password="mypassword"
         )
 
     assert updated.status == TelegramAccountStatus.ACTIVE
@@ -215,7 +217,8 @@ async def test_verify_code_wrong_code_raises(
     with patch.object(service, "_get_client", return_value=mock_client):
         with pytest.raises(AuthError, match="incorrect"):
             await service.verify_code(
-                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH
+                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH,
+                temp_session="fake_temp_session_string",
             )
 
 

@@ -67,6 +67,13 @@ class AuthStartResult:
 
     account_id: int
     phone_code_hash: str  # Required by Telegram to verify the code
+    temp_session: str
+    # The exact StringSession used for send_code_request(). Telegram ties the
+    # login code to the specific auth key/connection that requested it — a
+    # fresh client+session for sign_in() will fail with PhoneCodeExpiredError
+    # even with a valid phone_code_hash. The caller MUST pass this same
+    # string back into verify_code(). It is pre-authentication (no user is
+    # logged in yet) but should still never be logged or persisted long-term.
 
 
 class AccountService:
@@ -146,6 +153,12 @@ class AccountService:
         try:
             await client.connect()
             result = await client.send_code_request(phone_number)
+            # CRITICAL: capture the session BEFORE disconnecting. This is the
+            # exact auth key/connection the code was issued against — reusing
+            # it in verify_code() is required or Telegram will reject the
+            # code as expired regardless of correctness. See docs/ROADMAP.md
+            # Phase 5 for the full explanation.
+            temp_session = client.session.save()
         except Exception as exc:
             raise AuthError(f"Failed to send code: {exc}") from exc
         finally:
@@ -157,6 +170,7 @@ class AccountService:
         return AuthStartResult(
             account_id=account_id,
             phone_code_hash=result.phone_code_hash,
+            temp_session=temp_session,
         )
 
     async def verify_code(
@@ -166,6 +180,7 @@ class AccountService:
         phone_number: str,
         code: str,
         phone_code_hash: str,
+        temp_session: str,
         password: str | None = None,
     ) -> TelegramAccount:
         """Verify the login code (and optional 2FA password).
@@ -186,6 +201,11 @@ class AccountService:
             phone_number: Must match what was used in start_auth.
             code: The 5-6 digit code received by the user.
             phone_code_hash: The hash returned by start_auth.
+            temp_session: The EXACT StringSession string returned by
+                start_auth's AuthStartResult.temp_session. Reusing this same
+                session (same auth key) is required — a fresh empty session
+                here will make Telegram reject the code as expired even if
+                it's correct. See docs/ROADMAP.md Phase 5.
             password: 2FA cloud password, if applicable.
 
         Returns:
@@ -197,7 +217,10 @@ class AccountService:
         """
         account = await self._get_account_for_user(account_id, user_id)
 
-        client = self._get_client()
+        # CRITICAL: must reuse the exact session from start_auth — a fresh
+        # empty session here will always fail with PhoneCodeExpiredError,
+        # even for a correct/unexpired code. See docs/ROADMAP.md Phase 5.
+        client = self._get_client(string_session=temp_session)
         try:
             await client.connect()
 
