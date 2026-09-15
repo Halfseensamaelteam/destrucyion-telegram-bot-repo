@@ -48,18 +48,31 @@ def get_limiter() -> Limiter:
             storage_uri = "memory://"
             log.info("rate_limiter_memory_mode", msg="Using in-memory rate limiting (dev/test mode)")
         else:
+            # NOTE: get_redis_client() only constructs a lazy async client —
+            # it never raises even if Redis is completely unreachable, so a
+            # bare try/except around it never actually detects a dead Redis.
+            # Do a real synchronous PING with a short timeout instead, purely
+            # to decide the storage backend at startup.
+            storage_uri = "memory://"
             try:
-                redis_client = get_redis_client()
-                storage_uri = settings.redis_url if redis_client else "memory://"
-                if not redis_client:
-                    log.warning("rate_limiter_memory_fallback", msg="Redis unavailable, using in-memory rate limiting")
+                import redis as sync_redis  # local import: only needed here
+
+                probe = sync_redis.Redis.from_url(
+                    settings.redis_url,
+                    socket_connect_timeout=2,
+                    socket_timeout=2,
+                )
+                try:
+                    probe.ping()
+                    storage_uri = settings.redis_url
+                finally:
+                    probe.close()
             except Exception as exc:
                 log.warning(
-                    "rate_limiter_init_failed",
+                    "rate_limiter_memory_fallback",
                     error=str(exc),
-                    msg="Failed to initialize Redis rate limiter, falling back to in-memory",
+                    msg="Redis unreachable at startup, using in-memory rate limiting",
                 )
-                storage_uri = "memory://"
         
         _limiter = Limiter(key_func=get_remote_address, storage_uri=storage_uri)
     return _limiter
