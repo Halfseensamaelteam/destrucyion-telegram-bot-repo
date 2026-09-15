@@ -8,8 +8,12 @@ import os
 
 import pytest
 import pytest_asyncio
+from fakeredis import FakeAsyncRedis
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
+from app.core.redis import override_redis_client, reset_redis_client
 from app.db.models.base import Base
 import app.db.models  # noqa: F401 — registers all models
 
@@ -24,6 +28,19 @@ def reset_settings_cache():
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def fake_redis():
+    """Provide a fake Redis client for all tests.
+    
+    This fixture uses fakeredis to avoid requiring a real Redis instance
+    during testing. It's autouse so it applies to all tests automatically.
+    """
+    fake_client = FakeAsyncRedis(decode_responses=True)
+    override_redis_client(fake_client)
+    yield
+    reset_redis_client()
+
+
 @pytest.fixture
 def minimal_env(monkeypatch):
     """Set minimal required environment variables for Settings to load cleanly."""
@@ -32,6 +49,7 @@ def minimal_env(monkeypatch):
     monkeypatch.setenv("TELEGRAM_API_ID", "12345")
     monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
     monkeypatch.setenv("BOT_TOKEN", "123456:test-token")
+    # Don't set REDIS_URL - this will make rate limiter use in-memory storage
     return None
 
 

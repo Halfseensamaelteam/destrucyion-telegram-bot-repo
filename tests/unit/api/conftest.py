@@ -31,7 +31,24 @@ async def api_client(db_session: AsyncSession):
     async def override_get_session():
         yield db_session
 
+    # Override health check to use test database
+    async def override_check_db_health():
+        """Override health check to always return True in tests."""
+        return True
+
+    # Override Redis health check to always return True in tests
+    async def override_check_redis_health():
+        """Override Redis health check to always return True in tests."""
+        return True
+
+    from app.db.session import check_db_health
+    from app.core.redis import check_redis_health
+    from app.main import app
+    
     app.dependency_overrides[get_session] = override_get_session
+    app.dependency_overrides[check_db_health] = override_check_db_health
+    app.dependency_overrides[check_redis_health] = override_check_redis_health
+    
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         yield client

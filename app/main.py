@@ -13,7 +13,7 @@ Run locally:
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -30,9 +30,45 @@ log = get_logger(__name__)
 
 
 # Initialize rate limiter (using Redis if available, fallback to memory)
-redis_client = get_redis_client()
-storage_uri = settings.redis_url if redis_client else "memory://"
-limiter = Limiter(key_func=get_remote_address, storage_uri=storage_uri)
+# Phase 17: Graceful fallback to in-memory storage if Redis is unavailable
+# Note: This is initialized lazily to allow test overrides
+_limiter: Limiter | None = None
+
+
+def get_limiter() -> Limiter:
+    """Get or create the rate limiter instance.
+    
+    Phase 17: Lazy initialization to allow test overrides.
+    Uses in-memory storage in test mode or if Redis is unavailable.
+    """
+    global _limiter
+    if _limiter is None:
+        # Use in-memory storage in test mode or if Redis is unavailable
+        if settings.is_development or not settings.redis_url:
+            storage_uri = "memory://"
+            log.info("rate_limiter_memory_mode", msg="Using in-memory rate limiting (dev/test mode)")
+        else:
+            try:
+                redis_client = get_redis_client()
+                storage_uri = settings.redis_url if redis_client else "memory://"
+                if not redis_client:
+                    log.warning("rate_limiter_memory_fallback", msg="Redis unavailable, using in-memory rate limiting")
+            except Exception as exc:
+                log.warning(
+                    "rate_limiter_init_failed",
+                    error=str(exc),
+                    msg="Failed to initialize Redis rate limiter, falling back to in-memory",
+                )
+                storage_uri = "memory://"
+        
+        _limiter = Limiter(key_func=get_remote_address, storage_uri=storage_uri)
+    return _limiter
+
+
+def override_limiter(limiter: Limiter) -> None:
+    """Override the rate limiter (for testing)."""
+    global _limiter
+    _limiter = limiter
 
 
 @asynccontextmanager
@@ -64,19 +100,20 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    limiter = get_limiter()
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
     # Health check (public)
     @application.get("/api/health", tags=["health"])
-    async def health() -> JSONResponse:
+    async def health(
+        db_healthy: bool = Depends(check_db_health),
+        redis_healthy: bool = Depends(check_redis_health),
+    ) -> JSONResponse:
         """Return application health status, verifying DB and Redis.
         
         Phase 17: Uses dedicated health check functions with connection recovery.
         """
-        db_healthy = await check_db_health()
-        redis_healthy = await check_redis_health()
-        
         status = "ok" if db_healthy and redis_healthy else "error"
         
         if status == "error":

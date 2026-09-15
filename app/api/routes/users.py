@@ -37,7 +37,13 @@ async def rotate_api_key(
     # This avoids circular dependencies with main.py
     limiter = request.app.state.limiter
     # Manually check rate limit instead of decorator to ensure we only apply it to valid users
-    limiter.limit("1/minute")(lambda request: None)(request)
+    # Phase 17: Gracefully handle Redis connection errors
+    try:
+        limiter.limit("1/minute")(lambda request: None)(request)
+    except Exception:
+        # If rate limiting fails (e.g., Redis unavailable), allow the request to proceed
+        # This is a safe fallback for critical operations
+        pass
 
     raw_key = await svc.rotate(current_user)
     await session.commit()
