@@ -49,7 +49,7 @@ reading both.
 | Phase 15 — Vercel | ✅ PASS | `vercel.json`, `api/index.py` |
 | Phase 16 — Persistent Worker | ✅ PASS | `docs/DEPLOYMENT.md` |
 | Phase 17 — Production Hardening | ✅ PASS | Audit logs, DB/Redis recovery, security review |
-| Phase 18 — Final Trial | ⏳ Pending | — |
+| Phase 18 — Final Trial | ✅ PASS | Bot webhook integration, deployment guide, integration tests |
 
 ## Tech Stack (planned)
 
