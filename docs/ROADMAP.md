@@ -209,17 +209,47 @@ STOP until recovery behavior is predictable.
 
 ---
 
-## PHASE 11 — Telegram Bot
+## Phase 11: Auth Refactoring, Per-User Credentials & QR Login
 
-Implement bot commands in order:
-1. `/start /help /status`
-2. `/accounts /connect /disconnect /subscription`
-3. `/save`
-4. Admin commands.
+### Objectives
+Refactor the authentication flow to prevent Telegram's automated OTP detection/blocking, enforce isolated per-user API credentials, restrict access to authorized admins only, and enforce a strict 1-User-to-1-Account relationship.
 
-Test authorization for normal users and admins.
+---
 
-STOP if any user can access another user's account.
+### Tasks
+
+#### 11.1 Database Schema & Migration Update
+- [ ] Add `api_id` (Integer) and `api_hash` (String) columns to the `telegram_accounts` model.
+- [ ] Add a `UNIQUE` constraint on `telegram_accounts.user_id` to enforce 1 account per user.
+- [ ] Create an Alembic migration script (`alembic revision --autogenerate -m "add_api_credentials_and_unique_user_id"`) and test schema migration (`alembic upgrade head`).
+
+#### 11.2 Admin Authorization Guard
+- [ ] Implement a bot decorator/middleware in `python-telegram-bot` to check if incoming updates are from an authorized admin (`ADMIN_TELEGRAM_IDS` in `.env` or `users.is_admin == True`).
+- [ ] Reject commands from non-admin users with an "Unauthorized access" message.
+
+#### 11.3 Telethon QR Code Authentication Flow
+- [ ] Deprecate phone number + OTP code input in Telegram chat to avoid OTP burn/block.
+- [ ] Update `/connect` handler flow:
+  1. Check if user already has an active or bound account in `telegram_accounts`. If yes, reject and ask them to `/disconnect` first.
+  2. Prompt the admin user to provide their own `api_id` and `api_hash` (from https://my.telegram.org).
+  3. Initialize Telethon `TelegramClient` with the provided `api_id` and `api_hash`.
+  4. Generate a login QR Code using Telethon's `qr_login()` mechanism.
+  5. Render the QR code image in-memory using `qrcode` + `io.BytesIO` and send it as a photo to the Telegram chat with instructions (Settings > Devices > Link Desktop Device).
+  6. Listen for scan completion. Upon successful login, encrypt the session string, store `api_id`, `api_hash`, and `session_ciphertext` in `telegram_accounts`, and set status to `active`.
+
+#### 11.4 Refactor Commands & Worker Manager
+- [ ] Refactor `/accounts` command to display only the single bound account status instead of listing multiple accounts.
+- [ ] Refactor `/disconnect` to clean up the user's single account, terminate worker session, and reset status.
+- [ ] Update `worker/supervisor.py` to instantiate Telethon clients using each account's specific `api_id` and `api_hash` from the database, falling back to global `.env` credentials only if legacy records exist.
+
+---
+
+### Definition of Done (DoD)
+1. Alembic migration runs cleanly without errors.
+2. Non-admin users cannot interact with the bot.
+3. User cannot connect more than 1 account simultaneously.
+4. User can complete the login process by scanning a QR Code sent by the bot without entering any OTP in chat.
+5. Telethon worker successfully starts and manages userbot sessions using per-user `api_id` and `api_hash`.
 
 ---
 

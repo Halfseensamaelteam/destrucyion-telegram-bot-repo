@@ -16,6 +16,7 @@ Run with:
 import os
 import pytest
 import pytest_asyncio
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from app.core.config import get_settings
@@ -46,6 +47,7 @@ async def postgres_engine(is_postgres):
     engine = create_async_engine(
         settings.database_url,
         echo=False,
+        poolclass=NullPool,
     )
     
     # Create all tables

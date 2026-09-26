@@ -20,6 +20,7 @@ Security rules (CLAUDE.md §13):
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass
 
@@ -32,6 +33,7 @@ from telethon.errors import (
     RPCError,
 )
 from telethon.sessions import StringSession
+import qrcode
 
 from app.core.config import get_settings
 from app.core.crypto import SessionCipher
@@ -77,6 +79,15 @@ class AuthStartResult:
     # logged in yet) but should still never be logged or persisted long-term.
 
 
+@dataclass
+class QRAuthResult:
+    """Result of QR authentication start."""
+
+    account_id: int
+    qr_code_bytes: bytes  # PNG image bytes
+    login_obj: object  # Telethon QRLogin object for monitoring completion
+
+
 class AccountService:
     """Manages Telegram account creation, authentication, and session lifecycle."""
 
@@ -84,18 +95,28 @@ class AccountService:
         self._session = session
         self._repo = TelegramAccountRepository(session)
 
-    def _get_client(self, string_session: str | None = None) -> TelegramClient:
+    def _get_client(
+        self,
+        string_session: str | None = None,
+        api_id: int | None = None,
+        api_hash: str | None = None,
+    ) -> TelegramClient:
         """Create a Telethon client.
 
         Uses MemorySession (or StringSession if provided) — never a file session.
         The caller is responsible for connecting and disconnecting.
+
+        Args:
+            string_session: Optional StringSession string for reusing sessions.
+            api_id: Optional Telegram API ID (falls back to settings if None).
+            api_hash: Optional Telegram API hash (falls back to settings if None).
         """
         settings = get_settings()
         tg_session = StringSession(string_session) if string_session else StringSession()
         return TelegramClient(
             tg_session,
-            settings.telegram_api_id,
-            settings.telegram_api_hash,
+            api_id if api_id is not None else settings.telegram_api_id,
+            api_hash if api_hash is not None else settings.telegram_api_hash,
         )
 
     async def _get_account_for_user(
@@ -308,3 +329,132 @@ class AccountService:
             TelegramAccountStatus.DISCONNECTED,
             last_error=None,
         )
+
+    async def start_qr_auth(
+        self,
+        account_id: int,
+        user_id: int,
+        api_id: int,
+        api_hash: str,
+    ) -> QRAuthResult:
+        """Start QR code authentication for a Telegram account.
+
+        This method:
+        1. Creates a Telethon client with the provided API credentials
+        2. Generates a QR login code
+        3. Renders the QR code as a PNG image
+        4. Returns the image bytes and the login object for monitoring
+
+        The caller should:
+        - Send the QR code image to the user
+        - Call wait_qr_auth to wait for scan completion
+
+        Args:
+            account_id: The TelegramAccount row to authenticate.
+            user_id: Must own account_id (tenant isolation).
+            api_id: Telegram API ID from my.telegram.org.
+            api_hash: Telegram API hash from my.telegram.org.
+
+        Returns:
+            QRAuthResult with QR code PNG bytes and login object.
+
+        Raises:
+            AccountNotFoundError: If account does not belong to user_id.
+            AuthError: If QR generation fails.
+        """
+        account = await self._get_account_for_user(account_id, user_id)
+
+        # Check if user already has an active account
+        existing_accounts = await self._repo.list_by_user(user_id)
+        for acc in existing_accounts:
+            if acc.id != account_id and acc.status == TelegramAccountStatus.ACTIVE:
+                raise AuthError(
+                    "You already have an active account. Please disconnect it first using /disconnect."
+                )
+
+        client = self._get_client(api_id=api_id, api_hash=api_hash)
+        try:
+            await client.connect()
+            login = await client.qr_login()
+
+            # Generate QR code image
+            qr = qrcode.QRCode(version=1, box_size=10, border=5)
+            qr.add_data(login.url)
+            qr.make(fit=True)
+
+            img = qr.make_image(fill_color="black", back_color="white")
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG")
+            qr_bytes = buffer.getvalue()
+
+        except Exception as exc:
+            raise AuthError(f"Failed to generate QR code: {exc}") from exc
+        finally:
+            await client.disconnect()
+
+        return QRAuthResult(
+            account_id=account_id,
+            qr_code_bytes=qr_bytes,
+            login_obj=login,
+        )
+
+    async def wait_qr_auth(
+        self,
+        account_id: int,
+        user_id: int,
+        login_obj: object,
+        api_id: int,
+        api_hash: str,
+    ) -> TelegramAccount:
+        """Wait for QR code scan and complete authentication.
+
+        This method blocks until the user scans the QR code and approves the login.
+
+        Args:
+            account_id: The TelegramAccount row being authenticated.
+            user_id: Must own account_id.
+            login_obj: The QRLogin object from start_qr_auth.
+            api_id: Telegram API ID used for the client.
+            api_hash: Telegram API hash used for the client.
+
+        Returns:
+            The updated TelegramAccount (status=ACTIVE, session stored).
+
+        Raises:
+            AccountNotFoundError: Tenant violation.
+            AuthError: Login fails or times out.
+        """
+        account = await self._get_account_for_user(account_id, user_id)
+
+        client = self._get_client(api_id=api_id, api_hash=api_hash)
+        try:
+            await client.connect()
+
+            # Wait for user to scan QR code (timeout: 5 minutes)
+            try:
+                await login_obj.wait(timeout=300)
+            except Exception as exc:
+                raise AuthError(f"QR login timed out or failed: {exc}") from exc
+
+            # Get user info and encrypt session
+            me = await client.get_me()
+            cipher = SessionCipher.from_settings()
+            ciphertext = cipher.encrypt(client.session.save())
+
+        except (AccountNotFoundError, AuthError):
+            raise
+        except Exception as exc:
+            raise AuthError(f"Authentication failed unexpectedly: {exc}") from exc
+        finally:
+            await client.disconnect()
+
+        # Persist encrypted session with API credentials
+        account = await self._repo.update_session(
+            account,
+            session_ciphertext=ciphertext,
+            telegram_user_id=me.id if me else None,
+            username=me.username if me else None,
+            api_id=api_id,
+            api_hash=api_hash,
+        )
+        return account

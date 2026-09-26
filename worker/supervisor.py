@@ -254,10 +254,14 @@ class TelegramClientManager:
         from telethon.sessions import StringSession
 
         settings = get_settings()
+        # Use per-account API credentials if available, otherwise fall back to global settings
+        api_id = account.api_id if account.api_id else settings.telegram_api_id
+        api_hash = account.api_hash if account.api_hash else settings.telegram_api_hash
+        
         client = TelegramClient(
             StringSession(session_string),
-            settings.telegram_api_id,
-            settings.telegram_api_hash,
+            api_id,
+            api_hash,
         )
         # session_string goes out of scope here — GC will clear it
 

@@ -8,12 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.bot.dependencies import with_db_and_user
+from app.bot.dependencies import with_db_and_user, admin_required
 from app.db.models.user import User
 from app.db.repositories.subscription_repo import SubscriptionRepository
 
 
 @with_db_and_user
+@admin_required
 async def subscription_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:

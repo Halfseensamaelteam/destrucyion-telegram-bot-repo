@@ -276,12 +276,21 @@ async def test_multiple_accounts_one_fails_others_succeed(
 ):
     """Account isolation: a failed recovery for account A still processes account B."""
     from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+    from app.db.repositories.user_repo import UserRepository
     from app.db.models.telegram_account import TelegramAccountStatus
 
-    # Create a second account
+    # Create a second user and account (1-User-to-1-Account constraint)
+    user_repo = UserRepository(db_session)
+    user_b = await user_repo.create(
+        telegram_user_id=999999,
+        username="user_b",
+        first_name="User",
+        last_name="B",
+    )
+
     account_repo = TelegramAccountRepository(db_session)
     account_b = await account_repo.create(
-        user_id=user.id,
+        user_id=user_b.id,
         phone_masked="+628****1111",
         status=TelegramAccountStatus.ACTIVE,
     )
@@ -301,7 +310,7 @@ async def test_multiple_accounts_one_fails_others_succeed(
 
     # PENDING for account B — will succeed
     record_b = await repo.create(
-        user_id=user.id,
+        user_id=user_b.id,
         telegram_account_id=account_b.id,
         source_chat_id=200,
         source_message_id=2,
@@ -382,11 +391,21 @@ async def test_list_pending_returns_only_pending(db_session: AsyncSession, user,
 async def test_list_pending_filtered_by_account(db_session: AsyncSession, user, account):
     """list_pending(account_id=X) only returns records for that account."""
     from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+    from app.db.repositories.user_repo import UserRepository
     from app.db.models.telegram_account import TelegramAccountStatus
+
+    # Create a second user and account (1-User-to-1-Account constraint)
+    user_repo = UserRepository(db_session)
+    user_b = await user_repo.create(
+        telegram_user_id=888888,
+        username="user_b2",
+        first_name="User",
+        last_name="B2",
+    )
 
     account_repo = TelegramAccountRepository(db_session)
     other = await account_repo.create(
-        user_id=user.id,
+        user_id=user_b.id,
         phone_masked="+628****9999",
         status=TelegramAccountStatus.ACTIVE,
     )
@@ -399,7 +418,7 @@ async def test_list_pending_filtered_by_account(db_session: AsyncSession, user, 
         media_type=MediaType.PHOTO, status=MediaRecordStatus.PENDING,
     )
     r2 = await repo.create(
-        user_id=user.id, telegram_account_id=other.id,
+        user_id=user_b.id, telegram_account_id=other.id,
         source_chat_id=1, source_message_id=20,
         media_type=MediaType.PHOTO, status=MediaRecordStatus.PENDING,
     )

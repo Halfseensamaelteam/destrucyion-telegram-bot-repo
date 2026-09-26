@@ -93,8 +93,10 @@ def admin_only(func: InjectedHandlerType) -> InjectedHandlerType:
         @admin_only
         async def my_admin_handler(...)
 
-    Checks if the user's Telegram ID is in settings.admin_telegram_ids.
-    If not, sends a permission denied message and returns.
+    Checks if the user is authorized:
+      - User's Telegram ID is in settings.admin_telegram_ids, OR
+      - User.is_admin == True in the database
+    If not authorized, sends a permission denied message and returns.
     """
 
     @functools.wraps(func)
@@ -104,15 +106,68 @@ def admin_only(func: InjectedHandlerType) -> InjectedHandlerType:
         from app.core.config import get_settings
 
         settings = get_settings()
-        if user.telegram_user_id not in settings.admin_telegram_ids:
+        is_authorized = (
+            user.telegram_user_id in settings.admin_telegram_ids
+            or user.is_admin
+        )
+
+        if not is_authorized:
             log.warning(
                 "admin_access_denied",
                 user_id=user.id,
                 telegram_id=user.telegram_user_id,
+                is_admin=user.is_admin,
                 command=update.message.text if update.message else None,
             )
             if update.effective_message:
                 await update.effective_message.reply_text("⛔️ You do not have permission to use this command.")
+            return None
+
+        return await func(update, context, session, user)
+
+    return wrapper
+
+
+def admin_required(func: InjectedHandlerType) -> InjectedHandlerType:
+    """Decorator to restrict ALL bot commands to administrators only.
+
+    This is a global authorization guard that should be applied to all command handlers.
+    It checks if the user is authorized before allowing any command execution.
+
+    MUST be placed UNDER @with_db_and_user, e.g.:
+        @with_db_and_user
+        @admin_required
+        async def my_handler(...)
+
+    Authorization is based on:
+      - User's Telegram ID is in settings.admin_telegram_ids, OR
+      - User.is_admin == True in the database
+
+    If not authorized, sends an "Unauthorized access" message and returns.
+    """
+
+    @functools.wraps(func)
+    async def wrapper(
+        update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+    ) -> Any:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        is_authorized = (
+            user.telegram_user_id in settings.admin_telegram_ids
+            or user.is_admin
+        )
+
+        if not is_authorized:
+            log.warning(
+                "unauthorized_access",
+                user_id=user.id,
+                telegram_id=user.telegram_user_id,
+                is_admin=user.is_admin,
+                command=update.message.text if update.message else None,
+            )
+            if update.effective_message:
+                await update.effective_message.reply_text("⛔️ Unauthorized access. This service is restricted to administrators only.")
             return None
 
         return await func(update, context, session, user)

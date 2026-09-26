@@ -8,8 +8,22 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
-async def test_health_is_public(api_client):
+async def test_health_is_public(api_client, monkeypatch):
     """Health endpoint requires no auth."""
+    # Mock DB/Redis checks so it doesn't try to connect to non-existent DB
+    from app.db.session import _get_engine
+    
+    class MockConn:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): pass
+        async def execute(self, *args): pass
+
+    class MockEngine:
+        def connect(self): return MockConn()
+        
+    monkeypatch.setattr("app.main._get_engine", lambda: MockEngine())
+    monkeypatch.setattr("app.main.get_redis_client", lambda: None)
+    
     resp = await api_client.get("/api/health")
     assert resp.status_code == 200
 

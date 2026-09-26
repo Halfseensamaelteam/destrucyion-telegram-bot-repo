@@ -19,15 +19,13 @@ from app.bot.handlers.start import start_command, help_command, status_command
 from app.bot.handlers.account import (
     accounts_command,
     connect_start,
-    connect_phone,
-    connect_code,
-    connect_password,
+    connect_api_id,
+    connect_api_hash,
     connect_cancel,
     disconnect_command,
     disconnect_callback,
-    ENTER_PHONE,
-    ENTER_CODE,
-    ENTER_PASSWORD,
+    ENTER_API_ID,
+    ENTER_API_HASH,
 )
 from app.bot.handlers.subscription import subscription_command
 from app.bot.handlers.admin import admin_command
@@ -71,18 +69,15 @@ def create_bot_app() -> Application:
     application.add_handler(CommandHandler("disconnect", disconnect_command))
     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
 
-    # Connect Conversation Flow
+    # Connect Conversation Flow (QR Code Authentication)
     connect_handler = ConversationHandler(
         entry_points=[CommandHandler("connect", connect_start)],
         states={
-            ENTER_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_phone)
+            ENTER_API_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_id)
             ],
-            ENTER_CODE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_code)
-            ],
-            ENTER_PASSWORD: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_password)
+            ENTER_API_HASH: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_hash)
             ],
         },
         fallbacks=[CommandHandler("cancel", connect_cancel)],

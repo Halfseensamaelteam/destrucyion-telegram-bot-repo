@@ -8,13 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.bot.dependencies import with_db_and_user
+from app.bot.dependencies import with_db_and_user, admin_required
 from app.db.models.user import User
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.db.repositories.subscription_repo import SubscriptionRepository
 
 
 @with_db_and_user
+@admin_required
 async def start_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
@@ -34,6 +35,7 @@ async def start_command(
 
 
 @with_db_and_user
+@admin_required
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
@@ -67,6 +69,7 @@ async def help_command(
 
 
 @with_db_and_user
+@admin_required
 async def status_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:

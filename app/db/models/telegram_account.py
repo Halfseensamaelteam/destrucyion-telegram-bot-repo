@@ -10,7 +10,7 @@ Never share sessions between accounts or users.
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, String, Text, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base
@@ -29,6 +29,9 @@ class TelegramAccount(Base):
     """A Telegram user account linked to an application user."""
 
     __tablename__ = "telegram_accounts"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_telegram_accounts_user_id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(
@@ -42,6 +45,14 @@ class TelegramAccount(Base):
     phone_masked: Mapped[str | None] = mapped_column(
         String(50), nullable=True,
         comment="Masked phone like +62***1234 — NEVER store full phone",
+    )
+    api_id: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        comment="Telegram API ID for this account (from my.telegram.org)",
+    )
+    api_hash: Mapped[str | None] = mapped_column(
+        String(255), nullable=True,
+        comment="Telegram API Hash for this account (from my.telegram.org)",
     )
     session_ciphertext: Mapped[str | None] = mapped_column(
         Text, nullable=True,

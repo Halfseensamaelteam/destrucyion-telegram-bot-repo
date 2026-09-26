@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update, User as TelegramUser
 from telegram.ext import ContextTypes
 
-from app.bot.dependencies import with_db_and_user, admin_only
+from app.bot.dependencies import with_db_and_user, admin_only, admin_required
 from app.db.models.user import User
 
 pytestmark = pytest.mark.asyncio
@@ -114,7 +114,7 @@ async def test_admin_only_allows_admin(monkeypatch):
 
 
 async def test_admin_only_blocks_non_admin():
-    """If user is not in admin list, handler is blocked and replied to."""
+    """If user is not in admin list and user.is_admin is False, handler is blocked and replied to."""
     
     @admin_only
     async def dummy_handler(update, context, session, user):
@@ -125,6 +125,7 @@ async def test_admin_only_blocks_non_admin():
     session = MagicMock()
     user = MagicMock(spec=User)
     user.telegram_user_id = 111 # Not an admin
+    user.is_admin = False # Not an admin in DB either
     
     from app.core.config import get_settings
     settings = get_settings()
@@ -134,4 +135,75 @@ async def test_admin_only_blocks_non_admin():
     assert result is None
     update.effective_message.reply_text.assert_called_once_with(
         "⛔️ You do not have permission to use this command."
+    )
+
+
+async def test_admin_only_allows_via_is_admin():
+    """If user.is_admin is True, handler is executed even if not in admin_telegram_ids."""
+    
+    @admin_only
+    async def dummy_handler(update, context, session, user):
+        return "admin_success_via_db"
+
+    update = make_update()
+    context = MagicMock()
+    session = MagicMock()
+    user = MagicMock(spec=User)
+    user.telegram_user_id = 111 # Not in admin_telegram_ids
+    user.is_admin = True # But is admin in DB
+    
+    from app.core.config import get_settings
+    settings = get_settings()
+    settings.admin_telegram_ids = [999] # Different ID
+
+    result = await dummy_handler(update, context, session, user)
+    assert result == "admin_success_via_db"
+    update.effective_message.reply_text.assert_not_called()
+
+
+async def test_admin_required_allows_admin():
+    """If user is authorized (via admin_telegram_ids or is_admin), handler is executed."""
+    
+    @admin_required
+    async def dummy_handler(update, context, session, user):
+        return "admin_required_success"
+
+    update = make_update()
+    context = MagicMock()
+    session = MagicMock()
+    user = MagicMock(spec=User)
+    user.telegram_user_id = 999
+    user.is_admin = False
+    
+    from app.core.config import get_settings
+    settings = get_settings()
+    settings.admin_telegram_ids = [999]
+
+    result = await dummy_handler(update, context, session, user)
+    assert result == "admin_required_success"
+    update.effective_message.reply_text.assert_not_called()
+
+
+async def test_admin_required_blocks_non_admin():
+    """If user is not authorized, handler is blocked with unauthorized message."""
+    
+    @admin_required
+    async def dummy_handler(update, context, session, user):
+        pytest.fail("Should not execute")
+
+    update = make_update()
+    context = MagicMock()
+    session = MagicMock()
+    user = MagicMock(spec=User)
+    user.telegram_user_id = 111
+    user.is_admin = False
+    
+    from app.core.config import get_settings
+    settings = get_settings()
+    settings.admin_telegram_ids = [999]
+
+    result = await dummy_handler(update, context, session, user)
+    assert result is None
+    update.effective_message.reply_text.assert_called_once_with(
+        "⛔️ Unauthorized access. This service is restricted to administrators only."
     )
