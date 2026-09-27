@@ -8,10 +8,25 @@ Never hard-code secrets here — use .env.example as the template.
 """
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, SecretStr
+from pydantic import BeforeValidator, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _coerce_int_list(v: Any) -> Any:
+    """Accept a bare int or a comma-separated string as a list[int].
+
+    Pydantic-settings reads 'ADMIN_TELEGRAM_IDS=12345' as the integer 12345;
+    this validator wraps it in a list so the field type stays list[int].
+    It also handles a comma-separated string e.g. '12345,67890'.
+    """
+    if isinstance(v, int):
+        return [v]
+    if isinstance(v, str):
+        v = v.strip().strip("[]")
+        return [int(x.strip()) for x in v.split(",") if x.strip()]
+    return v
 
 
 class Settings(BaseSettings):
@@ -69,7 +84,7 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Telegram Bot token from @BotFather.",
     )
-    admin_telegram_ids: list[int] = Field(
+    admin_telegram_ids: Annotated[list[int], BeforeValidator(_coerce_int_list)] = Field(
         default_factory=list,
         description="List of integer Telegram user IDs authorized to use /admin commands.",
     )

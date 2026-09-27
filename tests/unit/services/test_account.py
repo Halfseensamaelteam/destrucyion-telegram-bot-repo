@@ -322,3 +322,70 @@ async def test_disconnect_account_tenant_isolation(db_session: AsyncSession, acc
     service = AccountService(db_session)
     with pytest.raises(AccountNotFoundError):
         await service.disconnect_account(account_id=account.id, user_id=account.user_id + 99999)
+
+
+# ---------------------------------------------------------------------------
+# try_resume_session — reuse a previously stored session instead of forcing
+# a fresh QR login (user-requested UX improvement).
+# ---------------------------------------------------------------------------
+
+async def test_try_resume_session_success(db_session: AsyncSession, user, qr_account):
+    """A still-valid stored session resumes without any QR/network round-trip
+    beyond the authorization check, and marks the account ACTIVE again."""
+    from app.core.crypto import SessionCipher
+
+    cipher = SessionCipher.from_settings()
+    repo = TelegramAccountRepository(db_session)
+    await repo.update(qr_account, session_ciphertext=cipher.encrypt("some_session_string"))
+    await repo.update_status(qr_account, TelegramAccountStatus.DISCONNECTED)
+
+    me = MagicMock(id=999, username="testuser")
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.is_user_authorized = AsyncMock(return_value=True)
+    mock_client.get_me = AsyncMock(return_value=me)
+    mock_client.disconnect = AsyncMock()
+
+    service = AccountService(db_session)
+    with patch("app.services.account.TelegramClient", return_value=mock_client), \
+         patch("app.services.account.StringSession", return_value=MagicMock()):
+        resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
+
+    assert resumed is True
+    await db_session.refresh(qr_account)
+    assert qr_account.status == TelegramAccountStatus.ACTIVE
+    assert qr_account.telegram_user_id == 999
+    mock_client.disconnect.assert_awaited_once()
+
+
+async def test_try_resume_session_revoked_returns_false(db_session: AsyncSession, user, qr_account):
+    """A revoked/invalid session must return False (not raise) so the
+    caller can fall back to a fresh QR login."""
+    from app.core.crypto import SessionCipher
+
+    cipher = SessionCipher.from_settings()
+    repo = TelegramAccountRepository(db_session)
+    await repo.update(qr_account, session_ciphertext=cipher.encrypt("stale_session_string"))
+    await repo.update_status(qr_account, TelegramAccountStatus.DISCONNECTED)
+
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.is_user_authorized = AsyncMock(return_value=False)
+    mock_client.disconnect = AsyncMock()
+
+    service = AccountService(db_session)
+    with patch("app.services.account.TelegramClient", return_value=mock_client), \
+         patch("app.services.account.StringSession", return_value=MagicMock()):
+        resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
+
+    assert resumed is False
+    await db_session.refresh(qr_account)
+    # Must remain DISCONNECTED — caller decides whether to launch fresh QR.
+    assert qr_account.status == TelegramAccountStatus.DISCONNECTED
+
+
+async def test_try_resume_session_no_session_returns_false(db_session: AsyncSession, user, qr_account):
+    """An account with no stored session at all can't be resumed."""
+    service = AccountService(db_session)
+    resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
+    assert resumed is False

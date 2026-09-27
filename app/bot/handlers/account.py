@@ -112,6 +112,43 @@ async def connect_start(
         )
         return ConversationHandler.END
 
+    # If this user previously connected and disconnected (rather than
+    # having their Telegram session revoked/unlinked), try to resume that
+    # exact session first — no need to make them scan a QR code again.
+    if existing is not None and existing.session_ciphertext:
+        await update.message.reply_text("🔄 Checking your previous session...")
+        svc = AccountService(session)
+        try:
+            resumed = await svc.try_resume_session(account_id=existing.id, user_id=user.id)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            resumed = False
+
+        if resumed:
+            await update.message.reply_text(
+                "✅ Reconnected using your previous session — no QR code needed!"
+            )
+            return ConversationHandler.END
+
+        await update.message.reply_text(
+            "⚠️ Your previous session is no longer valid. This usually means "
+            "the linked session was removed from Telegram (check Settings → "
+            "Devices in your Telegram app). Let's set up a new connection."
+        )
+        # api_id/api_hash are typically unaffected by a revoked session —
+        # reuse what's on file and go straight to QR rather than re-asking.
+        if existing.api_id and existing.api_hash_ciphertext:
+            chat_id = update.effective_chat.id
+            await context.bot.send_message(chat_id, "⏳ Generating your QR code...")
+            asyncio.create_task(
+                _run_qr_login_task(
+                    bot=context.bot, chat_id=chat_id, account_id=existing.id, user_id=user.id
+                )
+            )
+            return ConversationHandler.END
+        # else: fall through to ask for api_id/api_hash again below
+
     await update.message.reply_text(
         "Let's connect your Telegram account via QR login.\n\n"
         "First, you'll need YOUR OWN api_id and api_hash from "

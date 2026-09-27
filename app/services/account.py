@@ -267,6 +267,51 @@ class AccountService:
             username=me.username if me else None,
         )
 
+    async def try_resume_session(self, account_id: int, user_id: int) -> bool:
+        """Try to resume this account's PREVIOUSLY stored session, without a
+        full QR login. Used on /connect when a DISCONNECTED account already
+        has a session_ciphertext on file (e.g. the user only ran
+        /disconnect locally and never actually unlinked the device in
+        Telegram's own Settings > Devices).
+
+        Connects using the stored session + this account's own api_id/hash,
+        checks client.is_user_authorized(). If still valid, marks the
+        account ACTIVE again immediately and returns True — no QR needed.
+        If the session was revoked (unlinked from another device, password
+        changed, etc.), returns False so the caller can fall back to a
+        fresh QR login; this is normal and expected, not an error.
+
+        Raises:
+            AccountNotFoundError: Tenant violation.
+        """
+        account = await self._get_account_for_user(account_id, user_id)
+        if not account.session_ciphertext or not account.api_id or not account.api_hash_ciphertext:
+            return False  # nothing to resume
+
+        cipher = SessionCipher.from_settings()
+        session_string = cipher.decrypt(account.session_ciphertext)
+        api_hash = cipher.decrypt(account.api_hash_ciphertext)
+
+        client = TelegramClient(StringSession(session_string), account.api_id, api_hash)
+        try:
+            await client.connect()
+            if not await client.is_user_authorized():
+                return False
+
+            me = await client.get_me()
+        except Exception:
+            # Any failure here (network, revoked auth key, etc.) just means
+            # "can't resume" — fall back to QR login, don't raise.
+            return False
+        finally:
+            await client.disconnect()
+
+        await self._repo.update_status(account, TelegramAccountStatus.ACTIVE, last_error=None)
+        await self._repo.update(
+            account, telegram_user_id=me.id if me else None, username=me.username if me else None
+        )
+        return True
+
     async def load_session(self, account_id: int, user_id: int) -> StringSession:
         """Decrypt and return the StringSession for a connected account."""
         account = await self._get_account_for_user(account_id, user_id)

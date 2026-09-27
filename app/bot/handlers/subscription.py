@@ -2,25 +2,27 @@
 app.bot.handlers.subscription
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Subscription commands: /subscription
+
+This is an ordinary customer-facing command — any authenticated application
+user may check their OWN subscription status. It must NOT be admin-only.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.bot.dependencies import with_db_and_user, admin_required
+from app.bot.dependencies import with_db_and_user
 from app.db.models.user import User
 from app.db.repositories.subscription_repo import SubscriptionRepository
 
 
 @with_db_and_user
-@admin_required
 async def subscription_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
     """Handle /subscription command. Shows current active subscription."""
     repo = SubscriptionRepository(session)
-    subscription = await repo.get_active_for_user(user.id)
+    subscription = await repo.get_by_user_id(user.id)
 
     if not subscription:
         text = (
@@ -32,8 +34,8 @@ async def subscription_command(
     else:
         text = (
             "👑 *Subscription Status*\n\n"
-            f"🔹 *Tier:* {subscription.tier.name.title()}\n"
-            f"🔹 *Status:* {subscription.status.name.title()}\n"
+            f"🔹 *Plan:* {subscription.plan.value.title()}\n"
+            f"🔹 *Status:* {subscription.status.value.title()}\n"
             f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
             "Thank you for using our service!"
         )

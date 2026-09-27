@@ -1,0 +1,278 @@
+diff --git a/app/bot/handlers/account.py b/app/bot/handlers/account.py
+index 7251184..8a031eb 100644
+--- a/app/bot/handlers/account.py
++++ b/app/bot/handlers/account.py
+@@ -112,6 +112,43 @@ async def connect_start(
+         )
+         return ConversationHandler.END
+ 
++    # If this user previously connected and disconnected (rather than
++    # having their Telegram session revoked/unlinked), try to resume that
++    # exact session first — no need to make them scan a QR code again.
++    if existing is not None and existing.session_ciphertext:
++        await update.message.reply_text("🔄 Checking your previous session...")
++        svc = AccountService(session)
++        try:
++            resumed = await svc.try_resume_session(account_id=existing.id, user_id=user.id)
++            await session.commit()
++        except Exception:
++            await session.rollback()
++            resumed = False
++
++        if resumed:
++            await update.message.reply_text(
++                "✅ Reconnected using your previous session — no QR code needed!"
++            )
++            return ConversationHandler.END
++
++        await update.message.reply_text(
++            "⚠️ Your previous session is no longer valid. This usually means "
++            "the linked session was removed from Telegram (check Settings → "
++            "Devices in your Telegram app). Let's set up a new connection."
++        )
++        # api_id/api_hash are typically unaffected by a revoked session —
++        # reuse what's on file and go straight to QR rather than re-asking.
++        if existing.api_id and existing.api_hash_ciphertext:
++            chat_id = update.effective_chat.id
++            await context.bot.send_message(chat_id, "⏳ Generating your QR code...")
++            asyncio.create_task(
++                _run_qr_login_task(
++                    bot=context.bot, chat_id=chat_id, account_id=existing.id, user_id=user.id
++                )
++            )
++            return ConversationHandler.END
++        # else: fall through to ask for api_id/api_hash again below
++
+     await update.message.reply_text(
+         "Let's connect your Telegram account via QR login.\n\n"
+         "First, you'll need YOUR OWN api_id and api_hash from "
+diff --git a/app/bot/handlers/start.py b/app/bot/handlers/start.py
+index 13931fa..d51ab82 100644
+--- a/app/bot/handlers/start.py
++++ b/app/bot/handlers/start.py
+@@ -8,14 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ from telegram import Update
+ from telegram.ext import ContextTypes
+ 
+-from app.bot.dependencies import with_db_and_user, admin_required
++from app.bot.dependencies import with_db_and_user
+ from app.db.models.user import User
+ from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+ from app.db.repositories.subscription_repo import SubscriptionRepository
+ 
+ 
+ @with_db_and_user
+-@admin_required
+ async def start_command(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> None:
+@@ -35,7 +34,6 @@ async def start_command(
+ 
+ 
+ @with_db_and_user
+-@admin_required
+ async def help_command(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> None:
+@@ -69,7 +67,6 @@ async def help_command(
+ 
+ 
+ @with_db_and_user
+-@admin_required
+ async def status_command(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> None:
+@@ -81,14 +78,14 @@ async def status_command(
+     sub_repo = SubscriptionRepository(session)
+ 
+     accounts = await account_repo.list_by_user(user.id)
+-    subscription = await sub_repo.get_active_for_user(user.id)
++    subscription = await sub_repo.get_by_user_id(user.id)
+ 
+     status_text = f"📊 *Your Status Overview*\n\n"
+ 
+     # Subscription Section
+     if subscription:
+         status_text += (
+-            f"👑 *Subscription:* {subscription.tier.name.title()}\n"
++            f"👑 *Subscription:* {subscription.plan.value.title()}\n"
+             f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+         )
+     else:
+diff --git a/app/bot/handlers/subscription.py b/app/bot/handlers/subscription.py
+index 2bd48f9..031da84 100644
+--- a/app/bot/handlers/subscription.py
++++ b/app/bot/handlers/subscription.py
+@@ -2,25 +2,27 @@
+ app.bot.handlers.subscription
+ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ Subscription commands: /subscription
++
++This is an ordinary customer-facing command — any authenticated application
++user may check their OWN subscription status. It must NOT be admin-only.
+ """
+ 
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from telegram import Update
+ from telegram.ext import ContextTypes
+ 
+-from app.bot.dependencies import with_db_and_user, admin_required
++from app.bot.dependencies import with_db_and_user
+ from app.db.models.user import User
+ from app.db.repositories.subscription_repo import SubscriptionRepository
+ 
+ 
+ @with_db_and_user
+-@admin_required
+ async def subscription_command(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> None:
+     """Handle /subscription command. Shows current active subscription."""
+     repo = SubscriptionRepository(session)
+-    subscription = await repo.get_active_for_user(user.id)
++    subscription = await repo.get_by_user_id(user.id)
+ 
+     if not subscription:
+         text = (
+@@ -32,8 +34,8 @@ async def subscription_command(
+     else:
+         text = (
+             "👑 *Subscription Status*\n\n"
+-            f"🔹 *Tier:* {subscription.tier.name.title()}\n"
+-            f"🔹 *Status:* {subscription.status.name.title()}\n"
++            f"🔹 *Plan:* {subscription.plan.value.title()}\n"
++            f"🔹 *Status:* {subscription.status.value.title()}\n"
+             f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+             "Thank you for using our service!"
+         )
+diff --git a/app/services/account.py b/app/services/account.py
+index 844b003..3077a55 100644
+--- a/app/services/account.py
++++ b/app/services/account.py
+@@ -267,6 +267,51 @@ class AccountService:
+             username=me.username if me else None,
+         )
+ 
++    async def try_resume_session(self, account_id: int, user_id: int) -> bool:
++        """Try to resume this account's PREVIOUSLY stored session, without a
++        full QR login. Used on /connect when a DISCONNECTED account already
++        has a session_ciphertext on file (e.g. the user only ran
++        /disconnect locally and never actually unlinked the device in
++        Telegram's own Settings > Devices).
++
++        Connects using the stored session + this account's own api_id/hash,
++        checks client.is_user_authorized(). If still valid, marks the
++        account ACTIVE again immediately and returns True — no QR needed.
++        If the session was revoked (unlinked from another device, password
++        changed, etc.), returns False so the caller can fall back to a
++        fresh QR login; this is normal and expected, not an error.
++
++        Raises:
++            AccountNotFoundError: Tenant violation.
++        """
++        account = await self._get_account_for_user(account_id, user_id)
++        if not account.session_ciphertext or not account.api_id or not account.api_hash_ciphertext:
++            return False  # nothing to resume
++
++        cipher = SessionCipher.from_settings()
++        session_string = cipher.decrypt(account.session_ciphertext)
++        api_hash = cipher.decrypt(account.api_hash_ciphertext)
++
++        client = TelegramClient(StringSession(session_string), account.api_id, api_hash)
++        try:
++            await client.connect()
++            if not await client.is_user_authorized():
++                return False
++
++            me = await client.get_me()
++        except Exception:
++            # Any failure here (network, revoked auth key, etc.) just means
++            # "can't resume" — fall back to QR login, don't raise.
++            return False
++        finally:
++            await client.disconnect()
++
++        await self._repo.update_status(account, TelegramAccountStatus.ACTIVE, last_error=None)
++        await self._repo.update(
++            account, telegram_user_id=me.id if me else None, username=me.username if me else None
++        )
++        return True
++
+     async def load_session(self, account_id: int, user_id: int) -> StringSession:
+         """Decrypt and return the StringSession for a connected account."""
+         account = await self._get_account_for_user(account_id, user_id)
+diff --git a/tests/unit/services/test_account.py b/tests/unit/services/test_account.py
+index 5037c2d..7b5e906 100644
+--- a/tests/unit/services/test_account.py
++++ b/tests/unit/services/test_account.py
+@@ -322,3 +322,70 @@ async def test_disconnect_account_tenant_isolation(db_session: AsyncSession, acc
+     service = AccountService(db_session)
+     with pytest.raises(AccountNotFoundError):
+         await service.disconnect_account(account_id=account.id, user_id=account.user_id + 99999)
++
++
++# ---------------------------------------------------------------------------
++# try_resume_session — reuse a previously stored session instead of forcing
++# a fresh QR login (user-requested UX improvement).
++# ---------------------------------------------------------------------------
++
++async def test_try_resume_session_success(db_session: AsyncSession, user, qr_account):
++    """A still-valid stored session resumes without any QR/network round-trip
++    beyond the authorization check, and marks the account ACTIVE again."""
++    from app.core.crypto import SessionCipher
++
++    cipher = SessionCipher.from_settings()
++    repo = TelegramAccountRepository(db_session)
++    await repo.update(qr_account, session_ciphertext=cipher.encrypt("some_session_string"))
++    await repo.update_status(qr_account, TelegramAccountStatus.DISCONNECTED)
++
++    me = MagicMock(id=999, username="testuser")
++    mock_client = AsyncMock()
++    mock_client.connect = AsyncMock()
++    mock_client.is_user_authorized = AsyncMock(return_value=True)
++    mock_client.get_me = AsyncMock(return_value=me)
++    mock_client.disconnect = AsyncMock()
++
++    service = AccountService(db_session)
++    with patch("app.services.account.TelegramClient", return_value=mock_client), \
++         patch("app.services.account.StringSession", return_value=MagicMock()):
++        resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
++
++    assert resumed is True
++    await db_session.refresh(qr_account)
++    assert qr_account.status == TelegramAccountStatus.ACTIVE
++    assert qr_account.telegram_user_id == 999
++    mock_client.disconnect.assert_awaited_once()
++
++
++async def test_try_resume_session_revoked_returns_false(db_session: AsyncSession, user, qr_account):
++    """A revoked/invalid session must return False (not raise) so the
++    caller can fall back to a fresh QR login."""
++    from app.core.crypto import SessionCipher
++
++    cipher = SessionCipher.from_settings()
++    repo = TelegramAccountRepository(db_session)
++    await repo.update(qr_account, session_ciphertext=cipher.encrypt("stale_session_string"))
++    await repo.update_status(qr_account, TelegramAccountStatus.DISCONNECTED)
++
++    mock_client = AsyncMock()
++    mock_client.connect = AsyncMock()
++    mock_client.is_user_authorized = AsyncMock(return_value=False)
++    mock_client.disconnect = AsyncMock()
++
++    service = AccountService(db_session)
++    with patch("app.services.account.TelegramClient", return_value=mock_client), \
++         patch("app.services.account.StringSession", return_value=MagicMock()):
++        resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
++
++    assert resumed is False
++    await db_session.refresh(qr_account)
++    # Must remain DISCONNECTED — caller decides whether to launch fresh QR.
++    assert qr_account.status == TelegramAccountStatus.DISCONNECTED
++
++
++async def test_try_resume_session_no_session_returns_false(db_session: AsyncSession, user, qr_account):
++    """An account with no stored session at all can't be resumed."""
++    service = AccountService(db_session)
++    resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
++    assert resumed is False

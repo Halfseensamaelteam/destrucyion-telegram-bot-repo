@@ -8,14 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.bot.dependencies import with_db_and_user, admin_required
+from app.bot.dependencies import with_db_and_user
 from app.db.models.user import User
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.db.repositories.subscription_repo import SubscriptionRepository
 
 
 @with_db_and_user
-@admin_required
 async def start_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
@@ -35,7 +34,6 @@ async def start_command(
 
 
 @with_db_and_user
-@admin_required
 async def help_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
@@ -69,7 +67,6 @@ async def help_command(
 
 
 @with_db_and_user
-@admin_required
 async def status_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
 ) -> None:
@@ -81,14 +78,14 @@ async def status_command(
     sub_repo = SubscriptionRepository(session)
 
     accounts = await account_repo.list_by_user(user.id)
-    subscription = await sub_repo.get_active_for_user(user.id)
+    subscription = await sub_repo.get_by_user_id(user.id)
 
     status_text = f"📊 *Your Status Overview*\n\n"
 
     # Subscription Section
     if subscription:
         status_text += (
-            f"👑 *Subscription:* {subscription.tier.name.title()}\n"
+            f"👑 *Subscription:* {subscription.plan.value.title()}\n"
             f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
         )
     else:
