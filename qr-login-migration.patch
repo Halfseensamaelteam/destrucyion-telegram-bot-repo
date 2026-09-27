@@ -1,0 +1,2183 @@
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 2da0710..d7235cb 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -437,9 +437,66 @@ Telegram User Account
+ 
+ Never assume `bot_user_id == telegram_account_id`.
+ 
+-Authentication may use: phone, login code, 2FA, QR authentication.
+-
+-Never store login codes or 2FA passwords. Telegram sessions are sensitive credentials.
++### 12.1 Authentication method: QR login ONLY — phone+code via bot chat is FORBIDDEN
++
++This service MUST authenticate Telegram user accounts using **Telethon's QR
++login flow** (`client.qr_login()`), and MUST NOT implement a phone-number +
++SMS/app login-code flow where the code is typed into the bot chat.
++
++**Why this is a hard rule, not a preference:** Telegram's servers detect the
++pattern "a login code was entered correctly, but from a different
++session/device than the one the sign-in is completing on" and treat it as
++your account credentials being phished — because that is exactly the shape
++of a real account-takeover attack (attacker asks victim to relay the code).
++Telegram blocks the login with a message like *"this code was previously
++shared"*, regardless of whether the code was correct or whether the parties
++involved consented to it. This is not something that can be fixed with a
++different retry strategy, disclaimers, or a consent checkbox in a privacy
++policy — it is server-side abuse detection independent of any agreement
++between the bot operator and the bot's user.
++
++QR login has no equivalent problem: the user scans the QR code using their
++own official Telegram client (the same client they're already logged into),
++which is the exact mechanism Telegram provides for linking a new
++device/session — the code/token is never typed into any chat.
++
++The original reference project (`Saveit.py`) avoids this problem entirely by
++being a single long-running script that the account owner runs themselves,
++entering the code directly into their own local process — not into a
++third-party bot's chat. That option is not available to a multi-tenant bot,
++which is why QR login is the only compliant path here.
++
++### 12.2 Each Telegram account authenticates with its OWN api_id/api_hash
++
++Do NOT use one global `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` (from `.env`) to
++authenticate every connected account. Each `TelegramAccount` row MUST store
++its own `api_id` and encrypted `api_hash`, supplied by the account's owner
++from https://my.telegram.org, and the Telethon client for that account must
++be constructed using that account's own credentials — never the operator's
++global one.
++
++This mirrors how `Saveit.py` works (each person running the script gets
++their own `api_id`/`api_hash` from their own my.telegram.org app) and gives
++each user account isolated application-level identity on Telegram's side,
++independent of every other tenant.
++
++`api_hash` must be encrypted at rest with the same `SessionCipher` used for
++session strings (CLAUDE.md §13) — treat it as equally sensitive.
++
++### 12.3 One Telegram account per application user (no multi-account per customer)
++
++Each application user (the person who `/start`s the bot) may connect **at
++most one** Telegram account. Do not allow a single user to add multiple
++Telegram accounts. Enforce this at the service layer (reject
++`create_account` if the user already has a non-disconnected account) — not
++just in the bot's UI copy.
++
++If a user needs to switch accounts, they must `/disconnect` the existing one
++first.
++
++Never store login codes or 2FA passwords beyond the single request needed to
++use them immediately. Telegram sessions (and now, per-account api_hash) are
++sensitive credentials — see CLAUDE.md §13.
+ 
+ ---
+ 
+diff --git a/app/bot/bot.py b/app/bot/bot.py
+index c98b951..20acb72 100644
+--- a/app/bot/bot.py
++++ b/app/bot/bot.py
+@@ -19,15 +19,14 @@ from app.bot.handlers.start import start_command, help_command, status_command
+ from app.bot.handlers.account import (
+     accounts_command,
+     connect_start,
+-    connect_phone,
+-    connect_code,
+-    connect_password,
++    connect_api_id,
++    connect_api_hash,
+     connect_cancel,
+     disconnect_command,
+     disconnect_callback,
+-    ENTER_PHONE,
+-    ENTER_CODE,
+-    ENTER_PASSWORD,
++    maybe_capture_2fa_password,
++    ENTER_API_ID,
++    ENTER_API_HASH,
+ )
+ from app.bot.handlers.subscription import subscription_command
+ from app.bot.handlers.admin import admin_command
+@@ -71,18 +70,29 @@ def create_bot_app() -> Application:
+     application.add_handler(CommandHandler("disconnect", disconnect_command))
+     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
+ 
+-    # Connect Conversation Flow
++    # 2FA password capture for in-progress QR logins (CLAUDE.md §12.1/§12.2).
++    # Registered in an EARLIER group (-1, default group is 0) so it gets
++    # first refusal on plain-text messages while a QR login for that chat
++    # is awaiting a password — it raises ApplicationHandlerStop to consume
++    # the update when it matches, and does nothing (falls through to group 0)
++    # otherwise.
++    application.add_handler(
++        MessageHandler(filters.TEXT & ~filters.COMMAND, maybe_capture_2fa_password),
++        group=-1,
++    )
++
++    # Connect Conversation Flow — QR login only (CLAUDE.md §12.1). This
++    # conversation ONLY collects this account's own api_id/api_hash; the
++    # actual QR code + optional 2FA step runs as a detached background task
++    # (see app/bot/handlers/account.py::_run_qr_login_task).
+     connect_handler = ConversationHandler(
+         entry_points=[CommandHandler("connect", connect_start)],
+         states={
+-            ENTER_PHONE: [
+-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_phone)
+-            ],
+-            ENTER_CODE: [
+-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_code)
++            ENTER_API_ID: [
++                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_id)
+             ],
+-            ENTER_PASSWORD: [
+-                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_password)
++            ENTER_API_HASH: [
++                MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_hash)
+             ],
+         },
+         fallbacks=[CommandHandler("cancel", connect_cancel)],
+diff --git a/app/bot/handlers/account.py b/app/bot/handlers/account.py
+index 4397abe..e03490a 100644
+--- a/app/bot/handlers/account.py
++++ b/app/bot/handlers/account.py
+@@ -3,58 +3,91 @@ app.bot.handlers.account
+ ~~~~~~~~~~~~~~~~~~~~~~~~
+ Account management commands: /accounts, /connect, /disconnect.
+ 
+-Implements the multi-step Telethon authentication flow using a ConversationHandler.
+-State is stored in PTB's in-memory `user_data` dict.
++Authentication uses QR login ONLY (CLAUDE.md §12.1) — there is no
++phone-number/code step. /connect collects this account's OWN api_id/api_hash
++(CLAUDE.md §12.2), then a QR code is shown for the user to scan with their
++own Telegram client. Since this can take a couple of minutes and involves
++refreshing the QR code and possibly a 2FA prompt, the actual login runs as a
++detached background task rather than inside the ConversationHandler — the
++conversation itself only collects api_id/api_hash and then ends immediately.
++
++The optional 2FA password step happens OUTSIDE the ConversationHandler
++(the conversation has already ended by then): a plain-text message from the
++user is captured by `maybe_capture_2fa_password`, registered in an earlier
++handler group in app/bot/bot.py, which resolves a pending asyncio.Future
++that perform_qr_login() is awaiting.
+ """
+ 
++from __future__ import annotations
++
++import asyncio
++from typing import Any
++
+ from sqlalchemy.ext.asyncio import AsyncSession
+-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
++from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
+ from telegram.ext import (
++    ApplicationHandlerStop,
++    CallbackQueryHandler,
++    CommandHandler,
+     ContextTypes,
+     ConversationHandler,
+-    CommandHandler,
+     MessageHandler,
+-    CallbackQueryHandler,
+     filters,
+ )
+-from telethon.errors import SessionPasswordNeededError
+ 
+ from app.bot.dependencies import with_db_and_user
++from app.bot.qr_utils import render_qr_png
++from app.core.logging import get_logger
+ from app.db.models.user import User
+ from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+-from app.services.account import AccountService, AuthError
++from app.db.session import _get_session_factory
++from app.services.account import (
++    AccountAlreadyExistsError,
++    AccountService,
++    AuthError,
++    QrLoginCallbacks,
++)
++
++log = get_logger(__name__)
+ 
++# Conversation States — only for collecting credentials; the QR/2FA part
++# happens in a detached background task, not as further conversation states.
++ENTER_API_ID = 1
++ENTER_API_HASH = 2
+ 
+-# Conversation States
+-ENTER_PHONE = 1
+-ENTER_CODE = 2
+-ENTER_PASSWORD = 3
++# chat_id -> asyncio.Future[str], resolved by maybe_capture_2fa_password()
++# when the user replies with their 2FA password during an in-progress QR
++# login for that chat. Module-level and process-local by design: the QR
++# login task and the message handler run in the same bot process.
++_pending_2fa_futures: dict[int, "asyncio.Future[str]"] = {}
+ 
+ 
+ @with_db_and_user
+ async def accounts_command(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> None:
+-    """Handle /accounts command. Detailed view of connected accounts."""
++    """Handle /accounts command. Detailed view of the connected account."""
+     repo = TelegramAccountRepository(session)
+     accounts = await repo.list_by_user(user.id)
+ 
+     if not accounts:
+-        text = "You have no connected accounts. Use /connect to add one."
++        text = "You have no connected account. Use /connect to add one."
+     else:
+-        text = "📱 *Your Connected Accounts:*\n\n"
++        # CLAUDE.md §12.3 — at most one account per user, but loop defensively
++        # in case of pre-existing data from before this rule was enforced.
++        text = "📱 *Your Connected Account:*\n\n"
+         for acc in accounts:
+-            text += f"🔹 `{acc.phone_masked}`\n"
++            text += f"🔹 `{acc.username or acc.telegram_user_id or acc.id}`\n"
+             text += f"   Status: {acc.status.value.upper()}\n"
+             text += f"   ID: {acc.id}\n\n"
+-        text += "To remove an account, use /disconnect."
++        text += "To remove it, use /disconnect."
+ 
+     if update.message:
+         await update.message.reply_text(text, parse_mode="Markdown")
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# /connect Conversation Flow
++# /connect — collect this account's own api_id/api_hash, then QR login
+ # ---------------------------------------------------------------------------
+ 
+ @with_db_and_user
+@@ -63,154 +96,182 @@ async def connect_start(
+ ) -> int:
+     """Entry point for /connect."""
+     await update.message.reply_text(
+-        "Let's connect your Telegram account.\n\n"
+-        "Please enter your phone number in international format (e.g., +1234567890).\n\n"
+-        "Send /cancel to stop at any time."
++        "Let's connect your Telegram account via QR login.\n\n"
++        "First, you'll need YOUR OWN api_id and api_hash from "
++        "https://my.telegram.org (API development tools). This project "
++        "does not use a shared/operator api_id for your account — every "
++        "account brings its own, same as the original Saveit script.\n\n"
++        "Please send your *api_id* (numbers only).\n\n"
++        "Send /cancel to stop at any time.",
++        parse_mode="Markdown",
+     )
+-    # Store the user ID in context just in case we need it outside the decorator
+     context.user_data["user_id"] = user.id
+-    return ENTER_PHONE
++    return ENTER_API_ID
+ 
+ 
+ @with_db_and_user
+-async def connect_phone(
++async def connect_api_id(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> int:
+-    """Handle phone number input."""
+-    phone = update.message.text.strip()
+-    if not phone.startswith("+"):
+-        await update.message.reply_text("Phone number must start with '+' (e.g., +1234567890). Try again:")
+-        return ENTER_PHONE
+-
+-    msg = await update.message.reply_text(f"Requesting a login code for {phone}...")
+-    
+-    svc = AccountService(session)
+-    try:
+-        # Create DB record first (DISCONNECTED)
+-        account = await svc.create_account(user_id=user.id, phone_number=phone)
+-        await session.commit()
+-        
+-        # Request code
+-        start_result = await svc.start_auth(
+-            account_id=account.id,
+-            user_id=user.id,
+-            phone_number=phone
+-        )
+-        await session.commit()
+-    except Exception as e:
+-        await msg.edit_text(f"❌ Failed to request code: {e}\n\nPlease try /connect again.")
+-        return ConversationHandler.END
++    """Handle api_id input."""
++    raw = update.message.text.strip()
++    if not raw.isdigit():
++        await update.message.reply_text("api_id must be numbers only. Try again:")
++        return ENTER_API_ID
+ 
+-    # Store state in memory
+-    context.user_data["phone"] = phone
+-    context.user_data["account_id"] = account.id
+-    context.user_data["phone_code_hash"] = start_result.phone_code_hash
+-    # CRITICAL: must be reused as-is in verify_code(), never regenerated —
+-    # see docs/ROADMAP.md Phase 5 for why.
+-    context.user_data["temp_session"] = start_result.temp_session
+-
+-    await msg.edit_text(
+-        f"✅ Code sent to your Telegram app for {phone}.\n\n"
+-        "Please enter the 5-digit code you received.\n"
+-        "If you have Two-Step Verification (2FA) enabled, you will be prompted for your password next."
++    context.user_data["api_id"] = int(raw)
++    await update.message.reply_text(
++        "Got it. Now send your *api_hash* (a 32-character string).",
++        parse_mode="Markdown",
+     )
+-    return ENTER_CODE
++    return ENTER_API_HASH
+ 
+ 
+ @with_db_and_user
+-async def connect_code(
++async def connect_api_hash(
+     update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+ ) -> int:
+-    """Handle code input."""
+-    code = update.message.text.strip()
+-    
+-    phone = context.user_data.get("phone")
+-    account_id = context.user_data.get("account_id")
+-    phone_code_hash = context.user_data.get("phone_code_hash")
+-    temp_session = context.user_data.get("temp_session")
+-
+-    if not all([phone, account_id, phone_code_hash, temp_session]):
+-        await update.message.reply_text("Session expired or corrupted. Please start over with /connect.")
+-        return ConversationHandler.END
++    """Handle api_hash input, create the account, then launch QR login."""
++    api_hash = update.message.text.strip()
++    api_id = context.user_data.get("api_id")
+ 
+-    msg = await update.message.reply_text("Verifying code...")
+-    svc = AccountService(session)
++    # Best-effort: remove the message containing api_hash from chat history,
++    # since it's a sensitive credential (same treatment as 2FA passwords).
++    try:
++        await update.message.delete()
++    except Exception:
++        pass
+ 
++    svc = AccountService(session)
+     try:
+-        await svc.verify_code(
+-            account_id=account_id,
+-            user_id=user.id,
+-            phone_number=phone,
+-            code=code,
+-            phone_code_hash=phone_code_hash,
+-            temp_session=temp_session,
+-        )
++        account = await svc.create_account(user_id=user.id, api_id=api_id, api_hash=api_hash)
+         await session.commit()
+-        await msg.edit_text("✅ Success! Your account is now connected and ACTIVE.")
+-        context.user_data.clear()
++    except AccountAlreadyExistsError as exc:
++        await update.effective_chat.send_message(f"❌ {exc}")
+         return ConversationHandler.END
+-
+-    except SessionPasswordNeededError:
+-        # 2FA required
+-        await msg.edit_text("🔐 Two-Step Verification (2FA) is enabled.\n\nPlease enter your password:")
+-        context.user_data["code"] = code # Save code for the next step
+-        return ENTER_PASSWORD
+-
+-    except Exception as e:
+-        await msg.edit_text(f"❌ Verification failed: {e}\n\nPlease try /connect again.")
+-        context.user_data.clear()
++    except Exception as exc:
++        await session.rollback()
++        await update.effective_chat.send_message(f"❌ Failed to save credentials: {exc}")
+         return ConversationHandler.END
+ 
++    chat_id = update.effective_chat.id
++    await context.bot.send_message(
++        chat_id, "⏳ Generating your QR code — this may take a moment..."
++    )
+ 
+-@with_db_and_user
+-async def connect_password(
+-    update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+-) -> int:
+-    """Handle 2FA password input."""
+-    password = update.message.text
+-    
+-    phone = context.user_data.get("phone")
+-    account_id = context.user_data.get("account_id")
+-    phone_code_hash = context.user_data.get("phone_code_hash")
+-    temp_session = context.user_data.get("temp_session")
+-    code = context.user_data.get("code")
+-
+-    msg = await update.message.reply_text("Verifying password...")
+-    
+-    # Delete the user's message so the password isn't left in the chat history
+-    try:
+-        await update.message.delete()
+-    except Exception:
+-        pass # Bot might not have delete permission
++    # Launch the actual login as a detached background task. The
++    # conversation ends here; the QR/2FA exchange happens independently
++    # (see maybe_capture_2fa_password for the 2FA reply path).
++    asyncio.create_task(
++        _run_qr_login_task(bot=context.bot, chat_id=chat_id, account_id=account.id, user_id=user.id)
++    )
+ 
+-    svc = AccountService(session)
+-    try:
+-        await svc.verify_code(
+-            account_id=account_id,
+-            user_id=user.id,
+-            phone_number=phone,
+-            code=code,
+-            phone_code_hash=phone_code_hash,
+-            temp_session=temp_session,
+-            password=password,
+-        )
+-        await session.commit()
+-        await msg.edit_text("✅ Success! Your account is now connected and ACTIVE.")
+-        
+-    except Exception as e:
+-        await msg.edit_text(f"❌ Verification failed: {e}\n\nPlease try /connect again.")
+-        
+     context.user_data.clear()
+     return ConversationHandler.END
+ 
+ 
+ async def connect_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+-    """Cancel the /connect flow."""
++    """Cancel the /connect flow (only applies to the api_id/api_hash steps)."""
+     context.user_data.clear()
+     await update.message.reply_text("Connection cancelled.")
+     return ConversationHandler.END
+ 
+ 
++async def _run_qr_login_task(bot: Any, chat_id: int, account_id: int, user_id: int) -> None:
++    """Background task: generate/refresh the QR code and drive perform_qr_login.
++
++    Opens its OWN database session (the ConversationHandler's session is
++    already closed by the time this runs), since it can run for minutes.
++    """
++    session_factory = _get_session_factory()
++    qr_message_id: int | None = None
++
++    async def on_qr_ready(url: str) -> None:
++        nonlocal qr_message_id
++        photo = render_qr_png(url)
++        caption = (
++            "📷 Scan this QR code with your OWN Telegram app:\n"
++            "Settings → Devices → Link Desktop Device\n\n"
++            "This code refreshes automatically if it expires before you scan it."
++        )
++        if qr_message_id is None:
++            msg = await bot.send_photo(chat_id, photo=photo, caption=caption)
++            qr_message_id = msg.message_id
++        else:
++            try:
++                await bot.edit_message_media(
++                    chat_id=chat_id,
++                    message_id=qr_message_id,
++                    media=InputMediaPhoto(photo, caption=caption),
++                )
++            except Exception:
++                # If the old message can't be edited (e.g. deleted by user),
++                # just send a fresh one.
++                msg = await bot.send_photo(chat_id, photo=photo, caption=caption)
++                qr_message_id = msg.message_id
++
++    async def get_2fa_password() -> str:
++        loop = asyncio.get_event_loop()
++        future: "asyncio.Future[str]" = loop.create_future()
++        _pending_2fa_futures[chat_id] = future
++        await bot.send_message(
++            chat_id,
++            "🔐 Two-Step Verification (2FA) is enabled on this account.\n\n"
++            "Please reply with your Telegram cloud password. Your message "
++            "will be deleted immediately after it's read.",
++        )
++        try:
++            return await future
++        finally:
++            _pending_2fa_futures.pop(chat_id, None)
++
++    callbacks = QrLoginCallbacks(on_qr_ready=on_qr_ready, get_2fa_password=get_2fa_password)
++
++    async with session_factory() as session:
++        svc = AccountService(session)
++        try:
++            await svc.perform_qr_login(account_id=account_id, user_id=user_id, callbacks=callbacks)
++            await session.commit()
++            await bot.send_message(chat_id, "✅ Success! Your account is now connected and ACTIVE.")
++        except AuthError as exc:
++            await session.rollback()
++            await bot.send_message(chat_id, f"❌ {exc}\n\nPlease try /connect again.")
++        except Exception as exc:
++            await session.rollback()
++            log.error("qr_login_task_failed", account_id=account_id, error=str(exc), exc_info=True)
++            await bot.send_message(
++                chat_id, "❌ Something went wrong connecting your account. Please try /connect again."
++            )
++        finally:
++            _pending_2fa_futures.pop(chat_id, None)
++
++
++async def maybe_capture_2fa_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
++    """Global message handler: resolves a pending 2FA future, if one exists for this chat.
++
++    Must be registered in an EARLIER handler group than other MessageHandlers
++    (see app/bot/bot.py) so it can intercept the password reply before any
++    other handler treats it as ordinary text. Raises ApplicationHandlerStop
++    to prevent further handlers from also processing this update.
++    """
++    chat = update.effective_chat
++    if chat is None or update.message is None:
++        return
++
++    future = _pending_2fa_futures.get(chat.id)
++    if future is None or future.done():
++        return
++
++    password = update.message.text or ""
++    try:
++        await update.message.delete()
++    except Exception:
++        pass  # bot might lack delete permission; not fatal
++
++    future.set_result(password)
++    raise ApplicationHandlerStop
++
++
+ # ---------------------------------------------------------------------------
+ # /disconnect Flow
+ # ---------------------------------------------------------------------------
+@@ -224,13 +285,16 @@ async def disconnect_command(
+     accounts = await repo.list_by_user(user.id)
+ 
+     if not accounts:
+-        await update.message.reply_text("You have no connected accounts.")
++        await update.message.reply_text("You have no connected account.")
+         return
+ 
+     keyboard = []
+     for acc in accounts:
+-        keyboard.append([InlineKeyboardButton(f"Disconnect {acc.phone_masked}", callback_data=f"disconnect_{acc.id}")])
+-    
++        label = acc.username or acc.telegram_user_id or acc.id
++        keyboard.append(
++            [InlineKeyboardButton(f"Disconnect {label}", callback_data=f"disconnect_{acc.id}")]
++        )
++
+     keyboard.append([InlineKeyboardButton("Cancel", callback_data="disconnect_cancel")])
+     reply_markup = InlineKeyboardMarkup(keyboard)
+ 
+@@ -261,6 +325,6 @@ async def disconnect_callback(
+             # Tenant isolation: disconnect_account validates user ownership
+             await svc.disconnect_account(account_id=account_id, user_id=user.id)
+             await session.commit()
+-            await query.edit_message_text(f"✅ Account successfully disconnected.")
++            await query.edit_message_text("✅ Account successfully disconnected. You may /connect a new one.")
+         except Exception as e:
+             await query.edit_message_text(f"❌ Error disconnecting account: {e}")
+diff --git a/app/bot/qr_utils.py b/app/bot/qr_utils.py
+new file mode 100644
+index 0000000..66c0246
+--- /dev/null
++++ b/app/bot/qr_utils.py
+@@ -0,0 +1,26 @@
++"""
++app.bot.qr_utils
++~~~~~~~~~~~~~~~~~
++Renders a Telethon qr_login().url as a PNG image suitable for sending via
++the Telegram Bot API (client.send_photo expects file-like bytes).
++"""
++
++from __future__ import annotations
++
++import io
++
++import qrcode
++
++
++def render_qr_png(url: str) -> io.BytesIO:
++    """Render `url` as a PNG QR code, returned as an in-memory BytesIO.
++
++    The caller is responsible for sending/attaching this as a photo. Do not
++    write this to disk — it's used once and discarded.
++    """
++    img = qrcode.make(url)
++    buf = io.BytesIO()
++    buf.name = "connect_qr.png"
++    img.save(buf, format="PNG")
++    buf.seek(0)
++    return buf
+diff --git a/app/db/migrations/versions/0003_add_per_account_api_credentials.py b/app/db/migrations/versions/0003_add_per_account_api_credentials.py
+new file mode 100644
+index 0000000..7c67260
+--- /dev/null
++++ b/app/db/migrations/versions/0003_add_per_account_api_credentials.py
+@@ -0,0 +1,34 @@
++"""Add per-account api_id/api_hash_ciphertext for QR login (Phase 5 redesign)
++
++Revision ID: 0003
++Revises: 1895143b2b8c
++Create Date: 2026-09-16
++
++See CLAUDE.md §12.2: each Telegram account now authenticates with its own
++api_id/api_hash instead of the operator's global .env credentials.
++"""
++from typing import Sequence, Union
++
++import sqlalchemy as sa
++from alembic import op
++
++revision: str = "0003"
++down_revision: Union[str, None] = "1895143b2b8c"
++branch_labels: Union[str, Sequence[str], None] = None
++depends_on: Union[str, Sequence[str], None] = None
++
++
++def upgrade() -> None:
++    op.add_column(
++        "telegram_accounts",
++        sa.Column("api_id", sa.BigInteger(), nullable=True),
++    )
++    op.add_column(
++        "telegram_accounts",
++        sa.Column("api_hash_ciphertext", sa.Text(), nullable=True),
++    )
++
++
++def downgrade() -> None:
++    op.drop_column("telegram_accounts", "api_hash_ciphertext")
++    op.drop_column("telegram_accounts", "api_id")
+diff --git a/app/db/models/telegram_account.py b/app/db/models/telegram_account.py
+index 803d961..6d872e4 100644
+--- a/app/db/models/telegram_account.py
++++ b/app/db/models/telegram_account.py
+@@ -43,6 +43,16 @@ class TelegramAccount(Base):
+         String(50), nullable=True,
+         comment="Masked phone like +62***1234 — NEVER store full phone",
+     )
++    api_id: Mapped[int | None] = mapped_column(
++        BigInteger, nullable=True,
++        comment="This account's OWN Telegram api_id from my.telegram.org "
++                "(CLAUDE.md §12.2) — never the operator's global api_id",
++    )
++    api_hash_ciphertext: Mapped[str | None] = mapped_column(
++        Text, nullable=True,
++        comment="Fernet-encrypted api_hash for THIS account — as sensitive "
++                "as session_ciphertext, never log or expose",
++    )
+     session_ciphertext: Mapped[str | None] = mapped_column(
+         Text, nullable=True,
+         comment="Fernet-encrypted Telethon StringSession — NEVER log or expose",
+diff --git a/app/db/repositories/telegram_account_repo.py b/app/db/repositories/telegram_account_repo.py
+index b2dddea..5aa2f7f 100644
+--- a/app/db/repositories/telegram_account_repo.py
++++ b/app/db/repositories/telegram_account_repo.py
+@@ -44,6 +44,23 @@ class TelegramAccountRepository:
+         )
+         return list(result.scalars().all())
+ 
++    async def get_non_disconnected_for_user(
++        self, user_id: int
++    ) -> TelegramAccount | None:
++        """Return this user's account if it exists and is NOT disconnected.
++
++        Used to enforce CLAUDE.md §12.3 — one Telegram account per
++        application user. A user may only start connecting a new account
++        once their previous one is explicitly DISCONNECTED.
++        """
++        result = await self._session.execute(
++            select(TelegramAccount).where(
++                TelegramAccount.user_id == user_id,
++                TelegramAccount.status != TelegramAccountStatus.DISCONNECTED,
++            )
++        )
++        return result.scalar_one_or_none()
++
+     async def list_active(self) -> list[TelegramAccount]:
+         """Return all accounts with ACTIVE status across all users."""
+         result = await self._session.execute(
+diff --git a/app/services/account.py b/app/services/account.py
+index f9e88b5..605207f 100644
+--- a/app/services/account.py
++++ b/app/services/account.py
+@@ -3,78 +3,96 @@ app.services.account
+ ~~~~~~~~~~~~~~~~~~~~~
+ Business logic for Telegram account authentication and session management.
+ 
+-Authentication flow:
+-    1. create_account  — create DB row, mask phone number
+-    2. start_auth      — send_code_request via Telethon, return phone_code_hash
+-    3. verify_code     — sign_in, encrypt session, persist ciphertext
+-    4. load_session    — decrypt ciphertext → StringSession (do NOT log)
+-    5. disconnect_account — mark disconnected in DB
++Authentication flow (CLAUDE.md §12 — QR login ONLY):
++    1. create_account   — create DB row (rejects if user already has a
++                           non-disconnected account, §12.3), store this
++                           account's OWN api_id/api_hash (§12.2).
++    2. perform_qr_login  — long-running: generate QR, wait for scan, handle
++                           optional 2FA password, encrypt+persist session.
++    3. load_session      — decrypt ciphertext → StringSession (do NOT log)
++    4. disconnect_account — mark disconnected in DB
+ 
+ Security rules (CLAUDE.md §13):
+-    - Session strings are NEVER logged.
+-    - Session strings are NEVER returned from API endpoints.
+-    - Session strings are NEVER stored unencrypted.
++    - Session strings and api_hash are NEVER logged.
++    - Session strings and api_hash are NEVER returned from API endpoints.
++    - Session strings and api_hash are NEVER stored unencrypted.
+     - Only ciphertext touches the database.
+     - Tenant isolation: every method validates user_id ownership.
++
++Why QR login and not phone+code (CLAUDE.md §12.1):
++    Telegram's abuse detection blocks "this code was previously shared"
++    whenever a login code is typed into any chat (including a bot's chat)
++    before being used to sign in — this is indistinguishable, from
++    Telegram's server-side view, from a real account-phishing attempt. QR
++    login has no equivalent problem because no code is ever typed anywhere;
++    the user scans the QR with their own already-logged-in Telegram client.
+ """
+ 
+ from __future__ import annotations
+ 
+-import re
++import asyncio
+ from dataclasses import dataclass
++from typing import Awaitable, Callable
+ 
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from telethon import TelegramClient
+-from telethon.errors import (
+-    PhoneCodeExpiredError,
+-    PhoneCodeInvalidError,
+-    SessionPasswordNeededError,
+-    RPCError,
+-)
++from telethon.errors import RPCError, SessionPasswordNeededError
+ from telethon.sessions import StringSession
+ 
+-from app.core.config import get_settings
+ from app.core.crypto import SessionCipher
+ from app.db.models.telegram_account import TelegramAccount, TelegramAccountStatus
+ from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+ 
++# How long, in total, we're willing to keep showing/refreshing a QR code
++# before giving up on a single /connect attempt.
++QR_LOGIN_TOTAL_TIMEOUT_SECONDS = 5 * 60
++# Telethon's QR token itself expires after roughly this long; when wait()
++# times out we recreate the token and show a fresh QR rather than failing.
++QR_LOGIN_TOKEN_WAIT_SECONDS = 30
++# How long to wait for the user to reply with their 2FA password before
++# giving up on this attempt.
++QR_LOGIN_PASSWORD_TIMEOUT_SECONDS = 2 * 60
++
+ 
+ class AccountNotFoundError(Exception):
+     """Raised when an account does not exist or does not belong to the user."""
+ 
+ 
++class AccountAlreadyExistsError(Exception):
++    """Raised when a user already has a non-disconnected Telegram account.
++
++    Enforces CLAUDE.md §12.3 — one Telegram account per application user.
++    """
++
++
+ class AuthError(Exception):
+     """Raised when Telegram authentication fails."""
+ 
+ 
++class AuthTimeoutError(AuthError):
++    """Raised when the QR login was not completed within the time budget."""
++
++
+ class SessionError(Exception):
+     """Raised when a session cannot be loaded or decrypted."""
+ 
+ 
+-def _mask_phone(phone: str) -> str:
+-    """Mask a phone number, keeping only the last 4 digits.
++@dataclass
++class QrLoginCallbacks:
++    """Hooks the caller (bot handler) provides to drive the QR login UI.
+ 
+-    Example: +628123456789 → +62*******6789
++    All callbacks are awaited and may be called multiple times (e.g.
++    on_qr_ready fires again each time the QR token is refreshed).
+     """
+-    digits = re.sub(r"[^\d+]", "", phone)
+-    if len(digits) <= 4:
+-        return "*" * len(digits)
+-    return digits[: len(digits) - 8] + "****" + digits[-4:]
+ 
++    # Called with the QR login URL every time a (re)fresh token is issued.
++    # The caller is expected to render it as an image and send/edit it in chat.
++    on_qr_ready: Callable[[str], Awaitable[None]]
+ 
+-@dataclass
+-class AuthStartResult:
+-    """Result of start_auth — only contains data safe to pass around."""
+-
+-    account_id: int
+-    phone_code_hash: str  # Required by Telegram to verify the code
+-    temp_session: str
+-    # The exact StringSession used for send_code_request(). Telegram ties the
+-    # login code to the specific auth key/connection that requested it — a
+-    # fresh client+session for sign_in() will fail with PhoneCodeExpiredError
+-    # even with a valid phone_code_hash. The caller MUST pass this same
+-    # string back into verify_code(). It is pre-authentication (no user is
+-    # logged in yet) but should still never be logged or persisted long-term.
++    # Called when Telegram reports 2FA is required. Must return the password
++    # the user typed (the caller is responsible for prompting in chat and
++    # deleting that message immediately after reading it).
++    get_2fa_password: Callable[[], Awaitable[str]]
+ 
+ 
+ class AccountService:
+@@ -84,19 +102,18 @@ class AccountService:
+         self._session = session
+         self._repo = TelegramAccountRepository(session)
+ 
+-    def _get_client(self, string_session: str | None = None) -> TelegramClient:
+-        """Create a Telethon client.
++    def _get_client(
++        self, api_id: int, api_hash: str, string_session: str | None = None
++    ) -> TelegramClient:
++        """Create a Telethon client using THIS ACCOUNT's own api_id/api_hash.
+ 
+-        Uses MemorySession (or StringSession if provided) — never a file session.
+-        The caller is responsible for connecting and disconnecting.
++        CLAUDE.md §12.2 — never use the operator's global
++        settings.telegram_api_id/telegram_api_hash here.
++        Uses MemorySession (or StringSession if provided) — never a file
++        session. The caller is responsible for connecting and disconnecting.
+         """
+-        settings = get_settings()
+         tg_session = StringSession(string_session) if string_session else StringSession()
+-        return TelegramClient(
+-            tg_session,
+-            settings.telegram_api_id,
+-            settings.telegram_api_hash,
+-        )
++        return TelegramClient(tg_session, api_id, api_hash)
+ 
+     async def _get_account_for_user(
+         self, account_id: int, user_id: int
+@@ -110,163 +127,144 @@ class AccountService:
+         return account
+ 
+     async def create_account(
+-        self, *, user_id: int, phone_number: str
++        self, *, user_id: int, api_id: int, api_hash: str
+     ) -> TelegramAccount:
+         """Create a new TelegramAccount DB row in DISCONNECTED state.
+ 
+-        The phone number is masked before storing.
+-        """
+-        masked = _mask_phone(phone_number)
+-        account = await self._repo.create(
+-            user_id=user_id,
+-            phone_masked=masked,
+-            status=TelegramAccountStatus.DISCONNECTED,
+-        )
+-        return account
+-
+-    async def start_auth(
+-        self,
+-        account_id: int,
+-        user_id: int,
+-        phone_number: str,
+-    ) -> AuthStartResult:
+-        """Send a Telegram login code to the given phone number.
+-
+-        The phone_code_hash MUST be stored temporarily by the caller (e.g. in
+-        Redis or bot conversation state) and passed to verify_code. It is NOT
+-        persisted in the database.
++        Enforces CLAUDE.md §12.3: rejects with AccountAlreadyExistsError if
++        the user already has an account that is not DISCONNECTED. The
++        api_hash is encrypted before storage; api_id is stored as-is (it is
++        not a secret on its own — api_hash is the sensitive half).
+ 
+         Args:
+-            account_id: The TelegramAccount row to authenticate.
+-            user_id: Must own account_id (tenant isolation).
+-            phone_number: The full international phone number.
+-
+-        Returns:
+-            AuthStartResult with account_id and phone_code_hash.
++            user_id: The application user creating the account.
++            api_id: This account's OWN Telegram api_id (from my.telegram.org).
++            api_hash: This account's OWN Telegram api_hash. Encrypted at rest.
+ 
+         Raises:
+-            AccountNotFoundError: If account does not belong to user_id.
+-            AuthError: If Telegram rejects the code request.
++            AccountAlreadyExistsError: If user already has a connected/
++                in-progress account. They must /disconnect it first.
+         """
+-        account = await self._get_account_for_user(account_id, user_id)
+-
+-        client = self._get_client()
+-        try:
+-            await client.connect()
+-            result = await client.send_code_request(phone_number)
+-            # CRITICAL: capture the session BEFORE disconnecting. This is the
+-            # exact auth key/connection the code was issued against — reusing
+-            # it in verify_code() is required or Telegram will reject the
+-            # code as expired regardless of correctness. See docs/ROADMAP.md
+-            # Phase 5 for the full explanation.
+-            temp_session = client.session.save()
+-        except Exception as exc:
+-            raise AuthError(f"Failed to send code: {exc}") from exc
+-        finally:
+-            await client.disconnect()
+-
+-        # Update status to show auth is in progress
+-        await self._repo.update_status(account, TelegramAccountStatus.DISCONNECTED)
++        existing = await self._repo.get_non_disconnected_for_user(user_id)
++        if existing is not None:
++            raise AccountAlreadyExistsError(
++                "You already have a Telegram account connected (or a "
++                "connection in progress). Disconnect it first with "
++                "/disconnect before connecting a different one."
++            )
+ 
+-        return AuthStartResult(
+-            account_id=account_id,
+-            phone_code_hash=result.phone_code_hash,
+-            temp_session=temp_session,
++        cipher = SessionCipher.from_settings()
++        account = await self._repo.create(
++            user_id=user_id,
++            status=TelegramAccountStatus.DISCONNECTED,
+         )
++        account = await self._repo.update(
++            account,
++            api_id=api_id,
++            api_hash_ciphertext=cipher.encrypt(api_hash),
++        )
++        return account
+ 
+-    async def verify_code(
++    async def perform_qr_login(
+         self,
+         account_id: int,
+         user_id: int,
+-        phone_number: str,
+-        code: str,
+-        phone_code_hash: str,
+-        temp_session: str,
+-        password: str | None = None,
++        callbacks: QrLoginCallbacks,
+     ) -> TelegramAccount:
+-        """Verify the login code (and optional 2FA password).
++        """Run the full QR login flow for account_id, start to finish.
+ 
+-        On success:
+-            1. Serializes the session via StringSession.
+-            2. Encrypts it with SessionCipher.
+-            3. Stores the ciphertext in the database.
+-            4. Sets account status to ACTIVE.
+-
+-        The raw session string is NEVER returned to callers,
+-        NEVER stored anywhere except as ciphertext, and
+-        NEVER logged.
++        This holds ONE connected TelegramClient for the entire attempt —
++        across QR token refreshes and the optional 2FA step — because the
++        login is tied to that specific connection. Intended to be run as a
++        background task (e.g. asyncio.create_task) from the /connect
++        handler, since it can take up to QR_LOGIN_TOTAL_TIMEOUT_SECONDS.
+ 
+         Args:
+-            account_id: The account being authenticated.
+-            user_id: Must own account_id.
+-            phone_number: Must match what was used in start_auth.
+-            code: The 5-6 digit code received by the user.
+-            phone_code_hash: The hash returned by start_auth.
+-            temp_session: The EXACT StringSession string returned by
+-                start_auth's AuthStartResult.temp_session. Reusing this same
+-                session (same auth key) is required — a fresh empty session
+-                here will make Telegram reject the code as expired even if
+-                it's correct. See docs/ROADMAP.md Phase 5.
+-            password: 2FA cloud password, if applicable.
++            account_id: The (freshly created, DISCONNECTED) account row.
++            user_id: Must own account_id (tenant isolation).
++            callbacks: UI hooks — see QrLoginCallbacks.
+ 
+         Returns:
+             The updated TelegramAccount (status=ACTIVE, session stored).
+ 
+         Raises:
+             AccountNotFoundError: Tenant violation.
+-            AuthError: Wrong code, expired code, wrong password, etc.
++            AuthTimeoutError: QR was never scanned within the time budget,
++                or the 2FA password was never supplied in time.
++            AuthError: Any other Telegram authentication failure.
+         """
+         account = await self._get_account_for_user(account_id, user_id)
++        if account.api_id is None or account.api_hash_ciphertext is None:
++            raise AuthError(
++                "This account has no api_id/api_hash on file. Recreate it "
++                "with /connect and supply your own credentials first."
++            )
+ 
+-        # CRITICAL: must reuse the exact session from start_auth — a fresh
+-        # empty session here will always fail with PhoneCodeExpiredError,
+-        # even for a correct/unexpired code. See docs/ROADMAP.md Phase 5.
+-        client = self._get_client(string_session=temp_session)
++        cipher = SessionCipher.from_settings()
++        api_hash = cipher.decrypt(account.api_hash_ciphertext)
++
++        client = self._get_client(api_id=account.api_id, api_hash=api_hash)
+         try:
+             await client.connect()
+ 
+-            # If password is provided, skip code sign-in and go directly to password sign-in
+-            # This avoids "code previously shared" error when retrying with 2FA
+-            if password:
+-                await client.sign_in(password=password)
+-            else:
++            qr_login = await client.qr_login()
++            await callbacks.on_qr_ready(qr_login.url)
++
++            elapsed = 0.0
++            me = None
++            while elapsed < QR_LOGIN_TOTAL_TIMEOUT_SECONDS:
+                 try:
+-                    await client.sign_in(
+-                        phone=phone_number,
+-                        code=code,
+-                        phone_code_hash=phone_code_hash,
+-                    )
++                    me = await qr_login.wait(timeout=QR_LOGIN_TOKEN_WAIT_SECONDS)
++                    break
++                except asyncio.TimeoutError:
++                    elapsed += QR_LOGIN_TOKEN_WAIT_SECONDS
++                    if elapsed >= QR_LOGIN_TOTAL_TIMEOUT_SECONDS:
++                        raise AuthTimeoutError(
++                            "QR code was not scanned in time. Please /connect again."
++                        )
++                    # Token expired without being scanned — refresh and show
++                    # an updated QR rather than failing outright.
++                    await qr_login.recreate()
++                    await callbacks.on_qr_ready(qr_login.url)
+                 except SessionPasswordNeededError:
+-                    raise AuthError(
+-                        "2FA is enabled on this account. A cloud password is required."
+-                    )
+-                except PhoneCodeInvalidError:
+-                    raise AuthError("The login code is incorrect.")
+-                except PhoneCodeExpiredError:
+-                    raise AuthError("The login code has expired. Please request a new one.")
+-                except RPCError as e:
+-                    # Catch all other Telegram RPC errors and surface them
+-                    raise AuthError(f"Telegram authentication error: {e}") from e
++                    try:
++                        password = await asyncio.wait_for(
++                            callbacks.get_2fa_password(),
++                            timeout=QR_LOGIN_PASSWORD_TIMEOUT_SECONDS,
++                        )
++                    except asyncio.TimeoutError:
++                        raise AuthTimeoutError(
++                            "2FA password was not provided in time. "
++                            "Please /connect again."
++                        )
++                    # Same still-connected client/session — required, same
++                    # reasoning as the old phone+code flow's session
++                    # continuity rule (CLAUDE.md §12.1 / old Phase 5 note).
++                    await client.sign_in(password=password)
++                    me = await client.get_me()
++                    break
++
++            if me is None:
++                raise AuthError("QR login did not complete for an unknown reason.")
+ 
+             # --- Serialize session ---
+-            # SECURITY: This is the only place the raw session string is used.
+-            # It must be encrypted immediately and never assigned to a variable
+-            # that could be referenced beyond this scope.
+-            me = await client.get_me()
+-            cipher = SessionCipher.from_settings()
+-            ciphertext = cipher.encrypt(client.session.save())
+-
+-        except (AccountNotFoundError, AuthError):
++            # SECURITY: this is the only place the raw session string is
++            # used; it must be encrypted immediately and never assigned to
++            # a variable that could be referenced beyond this scope.
++            session_ciphertext = cipher.encrypt(client.session.save())
++
++        except (AccountNotFoundError, AuthTimeoutError, AuthError):
+             raise  # re-raise without wrapping
++        except RPCError as exc:
++            raise AuthError(f"Telegram authentication error: {exc}") from exc
+         except Exception as exc:
+             raise AuthError(f"Authentication failed unexpectedly: {exc}") from exc
+         finally:
+             await client.disconnect()
+ 
+-        # Persist encrypted session — raw session is out of scope here
+         account = await self._repo.update_session(
+             account,
+-            session_ciphertext=ciphertext,
++            session_ciphertext=session_ciphertext,
+             telegram_user_id=me.id if me else None,
+             username=me.username if me else None,
+         )
+@@ -294,6 +292,22 @@ class AccountService:
+         session_string = cipher.decrypt(account.session_ciphertext)
+         return StringSession(session_string)
+ 
++    def get_account_api_credentials(
++        self, account: TelegramAccount
++    ) -> tuple[int, str]:
++        """Decrypt and return (api_id, api_hash) for THIS account.
++
++        Used by the worker (CLAUDE.md §12.2) to build the per-account
++        Telethon client instead of the operator's global credentials. Do
++        NOT log the returned api_hash.
++        """
++        if account.api_id is None or account.api_hash_ciphertext is None:
++            raise SessionError(
++                f"Account {account.id} has no api_id/api_hash on file."
++            )
++        cipher = SessionCipher.from_settings()
++        return account.api_id, cipher.decrypt(account.api_hash_ciphertext)
++
+     async def disconnect_account(
+         self, account_id: int, user_id: int
+     ) -> TelegramAccount:
+@@ -301,6 +315,8 @@ class AccountService:
+ 
+         Does NOT revoke the Telegram session on the server side.
+         The session ciphertext is preserved so reconnection is possible.
++        Once DISCONNECTED, the user is free to /connect a new account
++        (CLAUDE.md §12.3).
+         """
+         account = await self._get_account_for_user(account_id, user_id)
+         return await self._repo.update_status(
+diff --git a/docs/ROADMAP.md b/docs/ROADMAP.md
+index e5d42de..77c91bf 100644
+--- a/docs/ROADMAP.md
++++ b/docs/ROADMAP.md
+@@ -98,53 +98,72 @@ STOP until all tests pass.
+ 
+ ---
+ 
+-## PHASE 5 — Telegram Account Authentication
+-
+-**Implement:** account creation, phone authentication, code verification, 2FA,
+-session serialization, session encryption, database storage.
+-
+-**CRITICAL DESIGN CONSTRAINT — Telethon session continuity:**
+-
+-`send_code_request()` and the subsequent `sign_in()` MUST be performed using
+-the exact same underlying session/connection (same auth key). Creating a new
+-`TelegramClient` with a fresh/empty `StringSession()` for `send_code_request`,
+-disconnecting it, and later creating ANOTHER new client with another fresh
+-`StringSession()` for `sign_in()` — even while correctly passing along
+-`phone_code_hash` — WILL reliably fail with `PhoneCodeExpiredError`, because
+-the login code is cryptographically tied to the specific auth key/connection
+-that requested it, not just the phone number.
+-
+-This matters specifically because this project's authentication happens
+-across multiple separate bot updates (phone number message, then code
+-message, then optional password message) — each potentially handled by a
+-different function call, unlike a single long-running script (e.g. the
+-original Saveit.py) where one client stays connected throughout.
+-
+-**Required pattern:**
+-1. In the "request code" step: create the client, connect, call
+-   `send_code_request()`, then — BEFORE disconnecting — capture
+-   `temp_session = client.session.save()`.
+-2. Return/store `temp_session` alongside `phone_code_hash` in the caller's
+-   temporary state (e.g. bot conversation `user_data`, or Redis with short
+-   TTL). This temp session is pre-authentication and low-sensitivity, but
+-   still must not be logged and should not persist beyond the auth flow.
+-3. In the "verify code" (and "verify 2FA password") step: reconstruct the
+-   client using that SAME `temp_session` string (`StringSession(temp_session)`)
+-   — never a fresh empty session — before calling `sign_in()`.
+-
+-**Test with a dedicated Telegram test account, end-to-end, for real** —
+-Telethon mocks/unit tests will NOT catch this class of bug, since a mock
+-doesn't know the difference between "same auth key" and "different auth
+-key". A unit test can verify that the same session string is threaded
+-through the calls, but only a real trial with an actual Telegram account
+-verifies the fix actually works against Telegram's servers.
+-
+-**Verify:** login (real trial, code accepted on first try, not "expired"),
+-restart, load session, disconnect, reconnect. Also verify the 2FA path
+-specifically, since it's a third step reusing the same temp session again.
+-
+-STOP if session persistence is unreliable, or if code verification fails
+-with "expired" errors under normal (prompt) use.
++## PHASE 5 — Telegram Account Authentication (QR Login)
++
++> **SUPERSEDES the original phone+code design.** The phone-number +
++> SMS/app-code flow (typed into the bot chat) is FORBIDDEN — see CLAUDE.md
++> §12.1 for why Telegram's abuse-detection blocks it regardless of
++> correctness or consent. This phase must implement QR login instead.
++
++**Implement:**
++
++1. **Per-account API credentials (CLAUDE.md §12.2).** Before QR login can
++   start, the user must supply their OWN `api_id` and `api_hash` (from
++   https://my.telegram.org) for the account being connected — not the
++   operator's global `.env` credentials. Store `api_id` as a plain integer
++   column and `api_hash` encrypted (same `SessionCipher` as sessions).
++2. **One account per user (CLAUDE.md §12.3).** `create_account` must reject
++   the request if the user already has an account that is not
++   `DISCONNECTED`. Enforce this in the service layer, not just the bot UI.
++3. **QR login flow**, using `client.qr_login()`:
++   - Build the Telethon client for this attempt using the account's own
++     `api_id`/`api_hash` (not the global settings).
++   - Call `qr_login = await client.qr_login()`; this exposes `.url`.
++   - Render `.url` as a QR code image (e.g. with `qrcode[pil]`) and send it
++     to the user in the bot chat.
++   - `await qr_login.wait(timeout=...)`. The QR token expires after a short
++     window (Telethon default ~30s); on `asyncio.TimeoutError`, call
++     `await qr_login.recreate()` and re-send the updated QR image, looping
++     up to a total wait budget (e.g. 5 minutes) before giving up.
++   - If `SessionPasswordNeededError` is raised during `.wait()`, prompt the
++     user in chat for their 2FA cloud password, then call
++     `client.sign_in(password=...)` on the SAME still-connected client
++     (do not create a new client/session for this step).
++   - On success, serialize+encrypt the session exactly as before (CLAUDE.md
++     §13), store `telegram_user_id`/`username` from `client.get_me()`, mark
++     the account `ACTIVE`.
++4. Because this flow holds a live, connected `TelegramClient` across
++   multiple waits/recreations, implement it as a single background task
++   (e.g. `asyncio.create_task`) spawned from the `/connect` command handler,
++   not as a multi-step `ConversationHandler` keyed on separate bot updates
++   for "enter code" — there is no code to enter anymore. The task can still
++   need one interactive step (the 2FA password, if enabled); handle that by
++   having the task await a chat-scoped `asyncio.Future`/`Event` that a
++   normal message handler resolves when the user replies with their
++   password (delete that message immediately after reading it, same as
++   before).
++
++**Test with a dedicated Telegram test account, end-to-end, for real:**
++- Fresh account, no 2FA: scan QR, confirm `ACTIVE` status and correct
++  `telegram_user_id`/`username` stored.
++- Account with 2FA enabled: scan QR, confirm the bot prompts for password
++  in chat, confirm success after correct password, confirm the password
++  message is deleted from chat history.
++- Let the QR expire without scanning (wait past the token lifetime),
++  confirm the bot automatically shows a refreshed QR rather than dying.
++- Attempt to `/connect` a second account while one is already `ACTIVE` for
++  the same user — confirm it is rejected per CLAUDE.md §12.3.
++- Confirm no plaintext `api_hash` or session string ever appears in logs.
++
++**Verify:** QR scan completes without Telegram's "code previously shared"
++block (there is no code to share in this flow, so this should not occur at
++all — if it does, something in the implementation regressed toward a
++code-based flow). Restart worker, confirm session reload still works
++exactly as before (this part is unchanged from the old design).
++
++STOP if QR sessions cannot be reliably completed, if 2FA handling breaks the
++single connected client requirement, or if a second account can be created
++for a user that already has an active one.
+ 
+ ---
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 1303683..fe5f69b 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -18,6 +18,7 @@ dependencies = [
+     "python-telegram-bot>=21.9",
+     "redis[hiredis]>=5.2.0",
+     "slowapi>=0.1.10",
++    "qrcode[pil]>=7.4.2",
+ ]
+ 
+ [project.optional-dependencies]
+diff --git a/tests/unit/bot/test_account.py b/tests/unit/bot/test_account.py
+index d1db18e..82c8492 100644
+--- a/tests/unit/bot/test_account.py
++++ b/tests/unit/bot/test_account.py
+@@ -1,149 +1,217 @@
+ """
+ tests/unit/bot/test_account.py
+-Unit tests for app.bot.handlers.account
++Unit tests for app.bot.handlers.account — QR login flow (CLAUDE.md §12).
+ """
+ 
++import asyncio
++
+ import pytest
+ from unittest.mock import AsyncMock, MagicMock, patch
+ 
+-from telegram import Update
+-from telegram.ext import ConversationHandler
++from telegram.ext import ApplicationHandlerStop, ConversationHandler
+ 
++from tests.unit.bot.test_dependencies import make_update
+ from app.bot.handlers.account import (
+-    accounts_command,
++    ENTER_API_HASH,
++    ENTER_API_ID,
++    _pending_2fa_futures,
++    _run_qr_login_task,
++    connect_api_hash,
++    connect_api_id,
+     connect_start,
+-    connect_phone,
+-    connect_code,
+-    connect_password,
+-    connect_cancel,
+-    ENTER_PHONE,
+-    ENTER_CODE,
+-    ENTER_PASSWORD,
++    maybe_capture_2fa_password,
+ )
+-from tests.unit.bot.test_dependencies import make_update
++from app.services.account import AccountAlreadyExistsError
+ 
+ pytestmark = pytest.mark.asyncio
+ 
+ 
+-async def test_connect_start():
+-    update = make_update()
++def _make_context(text: str | None = None):
+     context = MagicMock()
+     context.user_data = {}
++    context.bot = AsyncMock()
++    return context
++
++
++# ---------------------------------------------------------------------------
++# /connect conversation — collects api_id/api_hash only
++# ---------------------------------------------------------------------------
++
++async def test_connect_start_asks_for_api_id():
++    update = make_update(first_name="Alice")
++    context = _make_context()
+     session = MagicMock()
+-    user = MagicMock()
+-    user.id = 55
+-    
++    user = MagicMock(id=55)
++
+     result = await connect_start.__wrapped__(update, context, session, user)
+-    
+-    assert result == ENTER_PHONE
+-    assert context.user_data["user_id"] == 55
++
++    assert result == ENTER_API_ID
+     update.message.reply_text.assert_called_once()
+-    assert "enter your phone number" in update.message.reply_text.call_args[0][0].lower()
++    assert context.user_data["user_id"] == 55
+ 
+ 
+-@patch("app.bot.handlers.account.AccountService")
+-async def test_connect_phone_success(mock_account_service_cls):
++async def test_connect_api_id_rejects_non_numeric():
+     update = make_update()
+-    update.message.text = "+1234567890"
+-    
+-    context = MagicMock()
+-    context.user_data = {}
+-    session = AsyncMock()
+-    user = MagicMock()
+-    user.id = 55
+-
+-    # Mock AccountService
+-    mock_svc = AsyncMock()
+-    mock_account_service_cls.return_value = mock_svc
+-    
+-    mock_acc = MagicMock()
+-    mock_acc.id = 99
+-    mock_svc.create_account.return_value = mock_acc
+-    
+-    mock_start_res = MagicMock()
+-    mock_start_res.phone_code_hash = "hash123"
+-    mock_start_res.temp_session = "temp_sess_abc"
+-    mock_svc.start_auth.return_value = mock_start_res
+-    
+-    result = await connect_phone.__wrapped__(update, context, session, user)
+-    
+-    assert result == ENTER_CODE
+-    assert context.user_data["phone"] == "+1234567890"
+-    assert context.user_data["account_id"] == 99
+-    assert context.user_data["phone_code_hash"] == "hash123"
+-    assert context.user_data["temp_session"] == "temp_sess_abc"
+-    
+-    mock_svc.create_account.assert_called_once_with(user_id=55, phone_number="+1234567890")
+-    mock_svc.start_auth.assert_called_once_with(account_id=99, user_id=55, phone_number="+1234567890")
+-
+-
+-async def test_connect_phone_invalid_format():
++    update.message.text = "not-a-number"
++    context = _make_context()
++    session = MagicMock()
++    user = MagicMock(id=55)
++
++    result = await connect_api_id.__wrapped__(update, context, session, user)
++
++    assert result == ENTER_API_ID  # stays on the same state
++    assert "api_id" not in context.user_data
++
++
++async def test_connect_api_id_accepts_numeric():
+     update = make_update()
+-    update.message.text = "1234567890" # Missing +
+-    
+-    context = MagicMock()
++    update.message.text = "12345678"
++    context = _make_context()
+     session = MagicMock()
+-    user = MagicMock()
+-    
+-    result = await connect_phone.__wrapped__(update, context, session, user)
+-    
+-    assert result == ENTER_PHONE
+-    update.message.reply_text.assert_called_once()
+-    assert "start with '+'" in update.message.reply_text.call_args[0][0]
++    user = MagicMock(id=55)
++
++    result = await connect_api_id.__wrapped__(update, context, session, user)
+ 
++    assert result == ENTER_API_HASH
++    assert context.user_data["api_id"] == 12345678
+ 
+-@patch("app.bot.handlers.account.AccountService")
+-async def test_connect_code_success(mock_account_service_cls):
++
++async def test_connect_api_hash_creates_account_and_ends_conversation():
+     update = make_update()
+-    update.message.text = "55555"
+-    
+-    context = MagicMock()
+-    context.user_data = {
+-        "phone": "+1234567890",
+-        "account_id": 99,
+-        "phone_code_hash": "hash123",
+-        "temp_session": "temp_sess_abc"
+-    }
+-    session = AsyncMock()
+-    user = MagicMock()
+-    user.id = 55
+-
+-    mock_svc = AsyncMock()
+-    mock_account_service_cls.return_value = mock_svc
+-    
+-    result = await connect_code.__wrapped__(update, context, session, user)
+-    
++    update.message.text = "abcd1234efgh5678ijkl9012mnop3456"
++    update.message.delete = AsyncMock()
++    context = _make_context()
++    context.user_data["api_id"] = 12345678
++    session = MagicMock()
++    session.commit = AsyncMock()
++    user = MagicMock(id=55)
++
++    mock_account = MagicMock(id=101)
++
++    with patch("app.bot.handlers.account.AccountService") as MockSvc, \
++         patch("asyncio.create_task") as mock_create_task:
++        MockSvc.return_value.create_account = AsyncMock(return_value=mock_account)
++
++        result = await connect_api_hash.__wrapped__(update, context, session, user)
++
++    # asyncio.create_task was mocked, so the coroutine passed to it was
++    # never actually awaited/scheduled — close it explicitly to avoid a
++    # "coroutine was never awaited" ResourceWarning.
++    scheduled_coro = mock_create_task.call_args.args[0]
++    scheduled_coro.close()
++
+     assert result == ConversationHandler.END
+-    mock_svc.verify_code.assert_called_once_with(
+-        account_id=99, user_id=55, phone_number="+1234567890", code="55555",
+-        phone_code_hash="hash123", temp_session="temp_sess_abc"
+-    )
+-    # Context should be cleared on success
+-    assert not context.user_data
++    # Sensitive api_hash message must be deleted from chat history
++    update.message.delete.assert_awaited_once()
++    # A background task must have been scheduled for the actual QR login
++    mock_create_task.assert_called_once()
++    # Conversation state must be cleared
++    assert context.user_data == {}
+ 
+ 
+-@patch("app.bot.handlers.account.AccountService")
+-async def test_connect_code_needs_password(mock_account_service_cls):
++async def test_connect_api_hash_rejects_second_account():
+     update = make_update()
+-    update.message.text = "55555"
+-    
++    update.message.text = "abcd1234efgh5678ijkl9012mnop3456"
++    update.message.delete = AsyncMock()
++    update.effective_chat.send_message = AsyncMock()
++    context = _make_context()
++    context.user_data["api_id"] = 12345678
++    session = MagicMock()
++    session.rollback = AsyncMock()
++    user = MagicMock(id=55)
++
++    with patch("app.bot.handlers.account.AccountService") as MockSvc, \
++         patch("asyncio.create_task") as mock_create_task:
++        MockSvc.return_value.create_account = AsyncMock(
++            side_effect=AccountAlreadyExistsError("already have one")
++        )
++
++        result = await connect_api_hash.__wrapped__(update, context, session, user)
++
++    assert result == ConversationHandler.END
++    mock_create_task.assert_not_called()
++    update.effective_chat.send_message.assert_called_once()
++
++
++# ---------------------------------------------------------------------------
++# 2FA password capture (outside the ConversationHandler)
++# ---------------------------------------------------------------------------
++
++async def test_maybe_capture_2fa_password_resolves_pending_future():
++    update = make_update()
++    update.message.text = "my-secret-password"
++    update.message.delete = AsyncMock()
++    context = MagicMock()
++
++    chat_id = update.effective_chat.id
++    loop = asyncio.get_event_loop()
++    future = loop.create_future()
++    _pending_2fa_futures[chat_id] = future
++
++    try:
++        with pytest.raises(ApplicationHandlerStop):
++            await maybe_capture_2fa_password(update, context)
++
++        assert future.done()
++        assert future.result() == "my-secret-password"
++        update.message.delete.assert_awaited_once()
++    finally:
++        _pending_2fa_futures.pop(chat_id, None)
++
++
++async def test_maybe_capture_2fa_password_noop_without_pending_future():
++    update = make_update()
++    update.message.text = "just a normal message"
++    update.message.delete = AsyncMock()
+     context = MagicMock()
+-    context.user_data = {
+-        "phone": "+1234567890",
+-        "account_id": 99,
+-        "phone_code_hash": "hash123",
+-        "temp_session": "temp_sess_abc"
+-    }
+-    session = AsyncMock()
+-    user = MagicMock()
+-    
+-    from telethon.errors import SessionPasswordNeededError
+-    
+-    mock_svc = AsyncMock()
+-    mock_svc.verify_code.side_effect = SessionPasswordNeededError(request=None)
+-    mock_account_service_cls.return_value = mock_svc
+-    
+-    result = await connect_code.__wrapped__(update, context, session, user)
+-    
+-    assert result == ENTER_PASSWORD
+-    assert context.user_data["code"] == "55555"
++
++    # No entry in _pending_2fa_futures for this chat — must do nothing and
++    # must NOT raise ApplicationHandlerStop (so other handlers still run).
++    result = await maybe_capture_2fa_password(update, context)
++
++    assert result is None
++    update.message.delete.assert_not_awaited()
++
++
++# ---------------------------------------------------------------------------
++# _run_qr_login_task — the detached background task
++# ---------------------------------------------------------------------------
++
++async def test_run_qr_login_task_success_sends_confirmation():
++    bot = AsyncMock()
++
++    with patch("app.bot.handlers.account._get_session_factory") as mock_factory, \
++         patch("app.bot.handlers.account.AccountService") as MockSvc:
++        mock_session = AsyncMock()
++        mock_session.__aenter__.return_value = mock_session
++        mock_session.__aexit__.return_value = False
++        mock_factory.return_value = MagicMock(return_value=mock_session)
++        MockSvc.return_value.perform_qr_login = AsyncMock(return_value=MagicMock())
++
++        await _run_qr_login_task(bot=bot, chat_id=123, account_id=1, user_id=55)
++
++    bot.send_message.assert_any_call(123, "✅ Success! Your account is now connected and ACTIVE.")
++
++
++async def test_run_qr_login_task_failure_sends_error_and_cleans_up_future():
++    from app.services.account import AuthTimeoutError
++
++    bot = AsyncMock()
++    chat_id = 456
++    _pending_2fa_futures[chat_id] = asyncio.get_event_loop().create_future()
++
++    with patch("app.bot.handlers.account._get_session_factory") as mock_factory, \
++         patch("app.bot.handlers.account.AccountService") as MockSvc:
++        mock_session = AsyncMock()
++        mock_session.__aenter__.return_value = mock_session
++        mock_session.__aexit__.return_value = False
++        mock_factory.return_value = MagicMock(return_value=mock_session)
++        MockSvc.return_value.perform_qr_login = AsyncMock(
++            side_effect=AuthTimeoutError("QR code was not scanned in time.")
++        )
++
++        await _run_qr_login_task(bot=bot, chat_id=chat_id, account_id=1, user_id=55)
++
++    assert chat_id not in _pending_2fa_futures
++    sent_text = bot.send_message.call_args_list[-1].args[1]
++    assert "QR code was not scanned in time" in sent_text
+diff --git a/tests/unit/services/test_account.py b/tests/unit/services/test_account.py
+index f3c3813..978f43b 100644
+--- a/tests/unit/services/test_account.py
++++ b/tests/unit/services/test_account.py
+@@ -1,42 +1,47 @@
+ """
+ tests/unit/services/test_account.py
+-Unit tests for AccountService — all Telethon calls are mocked.
+-No real Telegram connection is made.
++Unit tests for AccountService — QR login flow (CLAUDE.md §12).
++All Telethon calls are mocked. No real Telegram connection is made.
+ """
+ 
++import asyncio
++
+ import pytest
+-from unittest.mock import AsyncMock, MagicMock, patch
+ from cryptography.fernet import Fernet
++from unittest.mock import AsyncMock, MagicMock, patch
+ 
+ from sqlalchemy.ext.asyncio import AsyncSession
+-from telethon.errors import (
+-    PhoneCodeInvalidError,
+-    SessionPasswordNeededError,
+-)
+-from telethon.sessions import StringSession
++from telethon.errors import SessionPasswordNeededError
+ 
+ from app.db.models.telegram_account import TelegramAccountStatus
+ from app.db.repositories import TelegramAccountRepository, UserRepository
++from app.services import account as account_module
+ from app.services.account import (
++    AccountAlreadyExistsError,
+     AccountNotFoundError,
+     AccountService,
+     AuthError,
++    AuthTimeoutError,
++    QrLoginCallbacks,
+     SessionError,
+-    _mask_phone,
+ )
+ 
+ pytestmark = pytest.mark.asyncio
+ 
+-FAKE_SESSION_STR = ""  # Valid empty Telethon StringSession (unauthenticated).
+-FAKE_PHONE = "+628123456789"
+-FAKE_CODE = "12345"
+-FAKE_HASH = "abc123hash"
++FAKE_API_ID = 12345678
++FAKE_API_HASH = "abcd1234efgh5678ijkl9012mnop3456"
+ 
+ 
+-# ---------------------------------------------------------------------------
+-# Helpers
+-# ---------------------------------------------------------------------------
++@pytest.fixture(autouse=True)
++def _session_encryption_key(monkeypatch):
++    """create_account/perform_qr_login encrypt api_hash/session via
++    SessionCipher, which requires SESSION_ENCRYPTION_KEY to be set."""
++    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
++    from app.core.config import get_settings
+ 
++    get_settings.cache_clear()
++    yield
++    get_settings.cache_clear()
+ 
+ 
+ def valid_fernet_key() -> str:
+@@ -44,231 +49,271 @@ def valid_fernet_key() -> str:
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# Phone masking
++# create_account — CLAUDE.md §12.2 (own api_id/hash) + §12.3 (one per user)
+ # ---------------------------------------------------------------------------
+ 
+-def test_mask_phone_standard():
+-    # +628123456789 → keep first 5 chars, mask 4, show last 4
+-    assert _mask_phone("+628123456789") == "+6281****6789"
+-
+-
+-def test_mask_phone_short():
+-    result = _mask_phone("+1234")
+-    assert "****" in result or result == "****"
+-
+-
+-# ---------------------------------------------------------------------------
+-# create_account
+-# ---------------------------------------------------------------------------
+-
+-async def test_create_account_masks_phone(db_session: AsyncSession, user):
++async def test_create_account_stores_own_api_credentials(db_session: AsyncSession, user):
+     service = AccountService(db_session)
+-    acc = await service.create_account(user_id=user.id, phone_number=FAKE_PHONE)
++    acc = await service.create_account(
++        user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
++    )
+ 
+     assert acc.id is not None
+-    assert acc.phone_masked is not None
+-    assert FAKE_PHONE not in acc.phone_masked  # Never store raw phone
++    assert acc.api_id == FAKE_API_ID
++    # api_hash must be encrypted, never stored as plaintext
++    assert acc.api_hash_ciphertext is not None
++    assert acc.api_hash_ciphertext != FAKE_API_HASH
+     assert acc.status == TelegramAccountStatus.DISCONNECTED
+ 
+ 
+-# ---------------------------------------------------------------------------
+-# start_auth — Telethon mocked
+-# ---------------------------------------------------------------------------
+-
+-async def test_start_auth_returns_phone_code_hash(
+-    db_session: AsyncSession, user, account, monkeypatch
++async def test_create_account_rejects_second_account_for_same_user(
++    db_session: AsyncSession, user, account
+ ):
++    """account fixture already creates an ACTIVE account for `user`."""
+     service = AccountService(db_session)
+-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
+-
+-    mock_result = MagicMock()
+-    mock_result.phone_code_hash = FAKE_HASH
+-
+-    mock_client = AsyncMock()
+-    mock_client.connect = AsyncMock()
+-    mock_client.send_code_request = AsyncMock(return_value=mock_result)
+-    mock_client.disconnect = AsyncMock()
+-
+-    with patch.object(service, "_get_client", return_value=mock_client):
+-        result = await service.start_auth(account.id, user.id, FAKE_PHONE)
++    with pytest.raises(AccountAlreadyExistsError):
++        await service.create_account(
++            user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
++        )
+ 
+-    assert result.phone_code_hash == FAKE_HASH
+-    assert result.account_id == account.id
+ 
++async def test_create_account_allowed_after_disconnect(db_session: AsyncSession, user, account):
++    """Once the existing account is DISCONNECTED, a new one may be created."""
++    repo = TelegramAccountRepository(db_session)
++    await repo.update_status(account, TelegramAccountStatus.DISCONNECTED)
+ 
+-async def test_start_auth_wrong_user_raises(
+-    db_session: AsyncSession, user, account
+-):
+     service = AccountService(db_session)
+-    with pytest.raises(AccountNotFoundError):
+-        await service.start_auth(account.id, user_id=9999, phone_number=FAKE_PHONE)
++    new_acc = await service.create_account(
++        user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
++    )
++    assert new_acc.id != account.id
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# verify_code — Telethon mocked
++# perform_qr_login — happy path
+ # ---------------------------------------------------------------------------
+ 
+-async def test_verify_code_success(
+-    db_session: AsyncSession, user, account, monkeypatch
+-):
+-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
+-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
+-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
+-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
++def _make_qr_login_mock(me_result, *, expire_once: bool = False, needs_2fa: bool = False):
++    """Build a mock Telethon qr_login() return value.
+ 
+-    from app.core.config import get_settings
+-    get_settings.cache_clear()
++    wait() behavior can be customized:
++      - expire_once: first call raises asyncio.TimeoutError, second succeeds
++      - needs_2fa: first call raises SessionPasswordNeededError
++    """
++    qr_login = MagicMock()
++    qr_login.url = "tg://login?token=FAKEQRTOKEN"
++    qr_login.recreate = AsyncMock()
+ 
+-    service = AccountService(db_session)
++    calls = {"n": 0}
++
++    async def wait(timeout=None):
++        calls["n"] += 1
++        if expire_once and calls["n"] == 1:
++            raise asyncio.TimeoutError()
++        if needs_2fa and calls["n"] == 1:
++            raise SessionPasswordNeededError(request=None)
++        return me_result
++
++    qr_login.wait = wait
++    return qr_login
+ 
+-    # Build a mock StringSession that save() returns our fake string
+-    mock_session = MagicMock(spec=StringSession)
+-    mock_session.save.return_value = FAKE_SESSION_STR
+ 
+-    mock_me = MagicMock()
+-    mock_me.id = 987654321
+-    mock_me.username = "testuser"
++@pytest.fixture
++async def qr_account(db_session: AsyncSession, user):
++    """An account with its own api_id/api_hash already on file."""
++    from app.core.crypto import SessionCipher
++
++    repo = TelegramAccountRepository(db_session)
++    account = await repo.create(user_id=user.id, status=TelegramAccountStatus.DISCONNECTED)
++    cipher = SessionCipher.from_settings()
++    account = await repo.update(
++        account, api_id=FAKE_API_ID, api_hash_ciphertext=cipher.encrypt(FAKE_API_HASH)
++    )
++    return account
++
++
++async def test_perform_qr_login_success(db_session: AsyncSession, user, qr_account):
++    me = MagicMock(id=999, username="testuser")
++    qr_login_obj = _make_qr_login_mock(me)
+ 
+     mock_client = AsyncMock()
+     mock_client.connect = AsyncMock()
+-    mock_client.sign_in = AsyncMock()
+-    mock_client.get_me = AsyncMock(return_value=mock_me)
++    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+     mock_client.disconnect = AsyncMock()
+-    mock_client.session = mock_session
++    mock_client.session.save = MagicMock(return_value="fake_authenticated_session")
+ 
++    on_qr_ready = AsyncMock()
++    get_2fa_password = AsyncMock()
++
++    service = AccountService(db_session)
+     with patch.object(service, "_get_client", return_value=mock_client):
+-        updated_account = await service.verify_code(
+-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
+-            temp_session="fake_temp_session_string",
++        result = await service.perform_qr_login(
++            account_id=qr_account.id,
++            user_id=user.id,
++            callbacks=QrLoginCallbacks(on_qr_ready=on_qr_ready, get_2fa_password=get_2fa_password),
+         )
+ 
+-    assert updated_account.status == TelegramAccountStatus.ACTIVE
+-    assert updated_account.session_ciphertext is not None
+-    # Ciphertext must differ from the plaintext session string (i.e. it's encrypted)
+-    assert updated_account.session_ciphertext != FAKE_SESSION_STR
+-    assert len(updated_account.session_ciphertext) > 10  # Fernet ciphertext is always long
+-    assert updated_account.telegram_user_id == 987654321
+-
+-    get_settings.cache_clear()
++    assert result.status == TelegramAccountStatus.ACTIVE
++    assert result.telegram_user_id == 999
++    assert result.username == "testuser"
++    assert result.session_ciphertext is not None
++    on_qr_ready.assert_awaited_once_with(qr_login_obj.url)
++    get_2fa_password.assert_not_awaited()
++    mock_client.disconnect.assert_awaited_once()
+ 
+ 
+-async def test_verify_code_2fa(
+-    db_session: AsyncSession, user, account, monkeypatch
++async def test_perform_qr_login_uses_account_own_credentials(
++    db_session: AsyncSession, user, qr_account
+ ):
+-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
+-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
+-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
+-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
++    """_get_client must be called with THIS account's api_id/api_hash, not globals."""
++    me = MagicMock(id=999, username="testuser")
++    qr_login_obj = _make_qr_login_mock(me)
+ 
+-    from app.core.config import get_settings
+-    get_settings.cache_clear()
++    mock_client = AsyncMock()
++    mock_client.connect = AsyncMock()
++    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
++    mock_client.session.save = MagicMock(return_value="fake_session")
+ 
+     service = AccountService(db_session)
++    with patch.object(service, "_get_client", return_value=mock_client) as mock_get_client:
++        await service.perform_qr_login(
++            account_id=qr_account.id,
++            user_id=user.id,
++            callbacks=QrLoginCallbacks(
++                on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()
++            ),
++        )
+ 
+-    mock_session = MagicMock(spec=StringSession)
+-    mock_session.save.return_value = FAKE_SESSION_STR
++    _, kwargs = mock_get_client.call_args
++    assert kwargs["api_id"] == FAKE_API_ID
++    assert kwargs["api_hash"] == FAKE_API_HASH
+ 
+-    mock_me = MagicMock()
+-    mock_me.id = 111
+-    mock_me.username = "twofa_user"
++
++async def test_perform_qr_login_refreshes_expired_token(
++    db_session: AsyncSession, user, qr_account
++):
++    me = MagicMock(id=999, username="testuser")
++    qr_login_obj = _make_qr_login_mock(me, expire_once=True)
+ 
+     mock_client = AsyncMock()
+     mock_client.connect = AsyncMock()
+-    # When password is provided, sign_in should be called directly with password
+-    mock_client.sign_in = AsyncMock()
+-    mock_client.get_me = AsyncMock(return_value=mock_me)
+-    mock_client.disconnect = AsyncMock()
+-    mock_client.session = mock_session
++    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
++    mock_client.session.save = MagicMock(return_value="fake_session")
++
++    on_qr_ready = AsyncMock()
+ 
++    service = AccountService(db_session)
+     with patch.object(service, "_get_client", return_value=mock_client):
+-        updated = await service.verify_code(
+-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
+-            temp_session="fake_temp_session_string", password="mypassword"
++        result = await service.perform_qr_login(
++            account_id=qr_account.id,
++            user_id=user.id,
++            callbacks=QrLoginCallbacks(on_qr_ready=on_qr_ready, get_2fa_password=AsyncMock()),
+         )
+ 
+-    assert updated.status == TelegramAccountStatus.ACTIVE
+-    # Verify password sign_in was called directly (no code sign-in attempt)
+-    mock_client.sign_in.assert_called_once_with(password="mypassword")
+-    get_settings.cache_clear()
+-
++    assert result.status == TelegramAccountStatus.ACTIVE
++    qr_login_obj.recreate.assert_awaited_once()
++    # Shown once initially, once again after refresh
++    assert on_qr_ready.await_count == 2
+ 
+-async def test_verify_code_wrong_code_raises(
+-    db_session: AsyncSession, user, account, monkeypatch
+-):
+-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
+ 
+-    service = AccountService(db_session)
++async def test_perform_qr_login_handles_2fa(db_session: AsyncSession, user, qr_account):
++    me = MagicMock(id=999, username="testuser")
++    qr_login_obj = _make_qr_login_mock(me, needs_2fa=True)
+ 
+     mock_client = AsyncMock()
+     mock_client.connect = AsyncMock()
+-    mock_client.sign_in = AsyncMock(side_effect=PhoneCodeInvalidError(request=None))
+-    mock_client.disconnect = AsyncMock()
++    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
++    mock_client.sign_in = AsyncMock()
++    mock_client.get_me = AsyncMock(return_value=me)
++    mock_client.session.save = MagicMock(return_value="fake_session")
++
++    get_2fa_password = AsyncMock(return_value="my-2fa-password")
+ 
++    service = AccountService(db_session)
+     with patch.object(service, "_get_client", return_value=mock_client):
+-        with pytest.raises(AuthError, match="incorrect"):
+-            await service.verify_code(
+-                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH,
+-                temp_session="fake_temp_session_string",
+-            )
++        result = await service.perform_qr_login(
++            account_id=qr_account.id,
++            user_id=user.id,
++            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=get_2fa_password),
++        )
+ 
++    assert result.status == TelegramAccountStatus.ACTIVE
++    get_2fa_password.assert_awaited_once()
++    # sign_in must be called on the SAME still-connected client, not a new one
++    mock_client.sign_in.assert_awaited_once_with(password="my-2fa-password")
+ 
+-# ---------------------------------------------------------------------------
+-# load_session
+-# ---------------------------------------------------------------------------
+ 
+-async def test_load_session_decrypts_correctly(
+-    db_session: AsyncSession, user, account, monkeypatch
++async def test_perform_qr_login_times_out_if_never_scanned(
++    db_session: AsyncSession, user, qr_account, monkeypatch
+ ):
+-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
+-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
+-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
++    # Shrink the timeouts so the test doesn't actually take 5 minutes, but
++    # keep them > 0 so the while loop actually runs at least once.
++    monkeypatch.setattr(account_module, "QR_LOGIN_TOKEN_WAIT_SECONDS", 0.01)
++    monkeypatch.setattr(account_module, "QR_LOGIN_TOTAL_TIMEOUT_SECONDS", 0.01)
+ 
+-    from app.core.config import get_settings
+-    from app.core.crypto import SessionCipher
+-    get_settings.cache_clear()
++    qr_login_obj = MagicMock()
++    qr_login_obj.url = "tg://login?token=NEVERSCANNED"
++    qr_login_obj.recreate = AsyncMock()
+ 
+-    # Store an encrypted session
+-    cipher = SessionCipher.from_settings()
+-    ciphertext = cipher.encrypt(FAKE_SESSION_STR)
++    async def always_times_out(timeout=None):
++        raise asyncio.TimeoutError()
+ 
+-    repo = TelegramAccountRepository(db_session)
+-    await repo.update_session(account, session_ciphertext=ciphertext)
++    qr_login_obj.wait = always_times_out
++
++    mock_client = AsyncMock()
++    mock_client.connect = AsyncMock()
++    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+ 
+     service = AccountService(db_session)
+-    loaded = await service.load_session(account.id, user.id)
++    with patch.object(service, "_get_client", return_value=mock_client):
++        with pytest.raises(AuthTimeoutError):
++            await service.perform_qr_login(
++                account_id=qr_account.id,
++                user_id=user.id,
++                callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
++            )
+ 
+-    assert isinstance(loaded, StringSession)
+-    assert loaded.save() == FAKE_SESSION_STR  # Decrypted correctly
+-    get_settings.cache_clear()
+ 
++async def test_perform_qr_login_tenant_isolation(db_session: AsyncSession, qr_account):
++    """A different user_id must not be able to drive someone else's account."""
++    service = AccountService(db_session)
++    with pytest.raises(AccountNotFoundError):
++        await service.perform_qr_login(
++            account_id=qr_account.id,
++            user_id=qr_account.user_id + 99999,
++            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
++        )
+ 
+-async def test_load_session_no_ciphertext_raises(
+-    db_session: AsyncSession, user, account
+-):
++
++# ---------------------------------------------------------------------------
++# get_account_api_credentials
++# ---------------------------------------------------------------------------
++
++async def test_get_account_api_credentials_decrypts(db_session: AsyncSession, qr_account):
+     service = AccountService(db_session)
+-    with pytest.raises(SessionError):
+-        await service.load_session(account.id, user.id)
++    api_id, api_hash = service.get_account_api_credentials(qr_account)
++    assert api_id == FAKE_API_ID
++    assert api_hash == FAKE_API_HASH
+ 
+ 
+-async def test_load_session_wrong_user_raises(
+-    db_session: AsyncSession, user, account
+-):
++async def test_get_account_api_credentials_missing_raises(db_session: AsyncSession, account):
++    """`account` fixture has no api_id/api_hash set."""
+     service = AccountService(db_session)
+-    with pytest.raises(AccountNotFoundError):
+-        await service.load_session(account.id, user_id=9999)
++    with pytest.raises(SessionError):
++        service.get_account_api_credentials(account)
+ 
+ 
+ # ---------------------------------------------------------------------------
+-# disconnect_account
++# disconnect_account — unchanged behavior, still tenant-isolated
+ # ---------------------------------------------------------------------------
+ 
+ async def test_disconnect_account(db_session: AsyncSession, user, account):
+     service = AccountService(db_session)
+-    result = await service.disconnect_account(account.id, user.id)
++    result = await service.disconnect_account(account_id=account.id, user_id=user.id)
+     assert result.status == TelegramAccountStatus.DISCONNECTED
++
++
++async def test_disconnect_account_tenant_isolation(db_session: AsyncSession, account):
++    service = AccountService(db_session)
++    with pytest.raises(AccountNotFoundError):
++        await service.disconnect_account(account_id=account.id, user_id=account.user_id + 99999)
+diff --git a/tests/unit/worker/test_supervisor_locking.py b/tests/unit/worker/test_supervisor_locking.py
+index 252575e..ed6600d 100644
+--- a/tests/unit/worker/test_supervisor_locking.py
++++ b/tests/unit/worker/test_supervisor_locking.py
+@@ -89,6 +89,9 @@ async def test_supervisor_skips_account_if_lock_taken(db_session, shared_redis,
+         phone_masked="+123",
+         status=TelegramAccountStatus.ACTIVE,
+         session_ciphertext=enc_session,
++        # CLAUDE.md §12.2: worker now requires per-account api_id/api_hash.
++        api_id=12345678,
++        api_hash_ciphertext=mock_cipher.encrypt("fake_api_hash_for_test"),
+     )
+     db_session.add(account)
+     await db_session.commit()
+diff --git a/worker/supervisor.py b/worker/supervisor.py
+index 71c19fc..a6ba9a2 100644
+--- a/worker/supervisor.py
++++ b/worker/supervisor.py
+@@ -249,17 +249,38 @@ class TelegramClientManager:
+             await self._mark_error(account_id, "Session decryption failed.")
+             return
+ 
+-        from app.core.config import get_settings
++        # CLAUDE.md §12.2: each account authenticates with its OWN
++        # api_id/api_hash, never the operator's global settings.
++        if account.api_id is None or account.api_hash_ciphertext is None:
++            log.error(
++                "client_skipped_no_api_credentials",
++                account_id=account_id,
++            )
++            await self._mark_error(
++                account_id, "Account has no api_id/api_hash on file."
++            )
++            return
++
++        try:
++            account_api_hash = self._cipher.decrypt(account.api_hash_ciphertext)
++        except SessionEncryptionError:
++            log.error(
++                "client_api_hash_decrypt_failed",
++                account_id=account_id,
++                # api_hash is NOT included in this log
++            )
++            await self._mark_error(account_id, "api_hash decryption failed.")
++            return
++
+         from telethon import TelegramClient
+         from telethon.sessions import StringSession
+ 
+-        settings = get_settings()
+         client = TelegramClient(
+             StringSession(session_string),
+-            settings.telegram_api_id,
+-            settings.telegram_api_hash,
++            account.api_id,
++            account_api_hash,
+         )
+-        # session_string goes out of scope here — GC will clear it
++        # session_string / account_api_hash go out of scope here — GC will clear them
+ 
+         managed = ManagedClient(
+             account_id=account_id,

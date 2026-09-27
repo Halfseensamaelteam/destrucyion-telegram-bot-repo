@@ -249,21 +249,34 @@ class TelegramClientManager:
             await self._mark_error(account_id, "Session decryption failed.")
             return
 
-        from app.core.config import get_settings
+        # CLAUDE.md §12.2: each account authenticates with its OWN
+        # api_id/api_hash — there is NO fallback to global/operator
+        # credentials. An account without these on file cannot be started.
+        if not account.api_id or not account.api_hash_ciphertext:
+            log.error("client_skipped_no_api_credentials", account_id=account_id)
+            await self._mark_error(account_id, "Account has no api_id/api_hash on file.")
+            return
+
+        try:
+            account_api_hash = self._cipher.decrypt(account.api_hash_ciphertext)
+        except SessionEncryptionError:
+            log.error(
+                "client_api_hash_decrypt_failed",
+                account_id=account_id,
+                # api_hash is NOT included in this log
+            )
+            await self._mark_error(account_id, "api_hash decryption failed.")
+            return
+
         from telethon import TelegramClient
         from telethon.sessions import StringSession
 
-        settings = get_settings()
-        # Use per-account API credentials if available, otherwise fall back to global settings
-        api_id = account.api_id if account.api_id else settings.telegram_api_id
-        api_hash = account.api_hash if account.api_hash else settings.telegram_api_hash
-        
         client = TelegramClient(
             StringSession(session_string),
-            api_id,
-            api_hash,
+            account.api_id,
+            account_api_hash,
         )
-        # session_string goes out of scope here — GC will clear it
+        # session_string / account_api_hash go out of scope here — GC will clear them
 
         managed = ManagedClient(
             account_id=account_id,

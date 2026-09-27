@@ -48,11 +48,13 @@ class TelegramAccount(Base):
     )
     api_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True,
-        comment="Telegram API ID for this account (from my.telegram.org)",
+        comment="Telegram API ID for this account (from my.telegram.org) — "
+                "CLAUDE.md §12.2, each account uses its OWN credentials",
     )
-    api_hash: Mapped[str | None] = mapped_column(
-        String(255), nullable=True,
-        comment="Telegram API Hash for this account (from my.telegram.org)",
+    api_hash_ciphertext: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Fernet-encrypted api_hash for THIS account — as sensitive "
+                "as session_ciphertext, never log or expose",
     )
     session_ciphertext: Mapped[str | None] = mapped_column(
         Text, nullable=True,

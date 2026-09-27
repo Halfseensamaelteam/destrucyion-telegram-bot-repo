@@ -38,6 +38,19 @@ class TelegramAccountRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_user_id(self, user_id: int) -> TelegramAccount | None:
+        """Return this user's single account row, if any.
+
+        With the DB-level UNIQUE constraint on user_id (CLAUDE.md §12.3),
+        there is at most one row per user, ever — connecting a new account
+        after /disconnect reuses/resets this same row rather than inserting
+        a new one.
+        """
+        result = await self._session.execute(
+            select(TelegramAccount).where(TelegramAccount.user_id == user_id)
+        )
+        return result.scalar_one_or_none()
+
     async def list_by_user(self, user_id: int) -> list[TelegramAccount]:
         result = await self._session.execute(
             select(TelegramAccount).where(TelegramAccount.user_id == user_id)
@@ -63,7 +76,7 @@ class TelegramAccountRepository:
         phone_masked: str | None = None,
         session_ciphertext: str | None = None,
         api_id: int | None = None,
-        api_hash: str | None = None,
+        api_hash_ciphertext: str | None = None,
     ) -> TelegramAccount:
         account = TelegramAccount(
             user_id=user_id,
@@ -73,7 +86,7 @@ class TelegramAccountRepository:
             session_ciphertext=session_ciphertext,
             status=status,
             api_id=api_id,
-            api_hash=api_hash,
+            api_hash_ciphertext=api_hash_ciphertext,
         )
         self._session.add(account)
         await self._session.flush()
@@ -113,7 +126,7 @@ class TelegramAccountRepository:
         username: str | None = None,
         status: TelegramAccountStatus = TelegramAccountStatus.ACTIVE,
         api_id: int | None = None,
-        api_hash: str | None = None,
+        api_hash_ciphertext: str | None = None,
     ) -> TelegramAccount:
         """Store the encrypted session ciphertext after a successful login.
 
@@ -131,8 +144,8 @@ class TelegramAccountRepository:
             account.username = username
         if api_id is not None:
             account.api_id = api_id
-        if api_hash is not None:
-            account.api_hash = api_hash
+        if api_hash_ciphertext is not None:
+            account.api_hash_ciphertext = api_hash_ciphertext
         await self._session.flush()
         await self._session.refresh(account)
         return account

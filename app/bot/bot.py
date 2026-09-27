@@ -24,6 +24,7 @@ from app.bot.handlers.account import (
     connect_cancel,
     disconnect_command,
     disconnect_callback,
+    maybe_capture_2fa_password,
     ENTER_API_ID,
     ENTER_API_HASH,
 )
@@ -68,6 +69,16 @@ def create_bot_app() -> Application:
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("disconnect", disconnect_command))
     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
+
+    # 2FA password capture for in-progress QR logins (CLAUDE.md §12.1/§12.2).
+    # Registered in an EARLIER group (-1, default group is 0) so it gets
+    # first refusal on plain-text messages while a QR login for that chat
+    # is awaiting a password. Raises ApplicationHandlerStop to consume the
+    # update when it matches; does nothing otherwise.
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, maybe_capture_2fa_password),
+        group=-1,
+    )
 
     # Connect Conversation Flow (QR Code Authentication)
     connect_handler = ConversationHandler(

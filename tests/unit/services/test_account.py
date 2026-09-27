@@ -1,42 +1,47 @@
 """
 tests/unit/services/test_account.py
-Unit tests for AccountService — all Telethon calls are mocked.
-No real Telegram connection is made.
+Unit tests for AccountService — QR login flow (CLAUDE.md §12).
+All Telethon calls are mocked. No real Telegram connection is made.
 """
 
+import asyncio
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from cryptography.fernet import Fernet
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from telethon.errors import (
-    PhoneCodeInvalidError,
-    SessionPasswordNeededError,
-)
-from telethon.sessions import StringSession
+from telethon.errors import SessionPasswordNeededError
 
 from app.db.models.telegram_account import TelegramAccountStatus
 from app.db.repositories import TelegramAccountRepository, UserRepository
+from app.services import account as account_module
 from app.services.account import (
+    AccountAlreadyExistsError,
     AccountNotFoundError,
     AccountService,
     AuthError,
+    AuthTimeoutError,
+    QrLoginCallbacks,
     SessionError,
-    _mask_phone,
 )
 
 pytestmark = pytest.mark.asyncio
 
-FAKE_SESSION_STR = ""  # Valid empty Telethon StringSession (unauthenticated).
-FAKE_PHONE = "+628123456789"
-FAKE_CODE = "12345"
-FAKE_HASH = "abc123hash"
+FAKE_API_ID = 12345678
+FAKE_API_HASH = "abcd1234efgh5678ijkl9012mnop3456"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _session_encryption_key(monkeypatch):
+    """create_account/perform_qr_login encrypt api_hash/session via
+    SessionCipher, which requires SESSION_ENCRYPTION_KEY to be set."""
+    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
+    from app.core.config import get_settings
 
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def valid_fernet_key() -> str:
@@ -44,231 +49,276 @@ def valid_fernet_key() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phone masking
+# create_account — CLAUDE.md §12.2 (own api_id/hash) + §12.3 (one per user)
 # ---------------------------------------------------------------------------
 
-def test_mask_phone_standard():
-    # +628123456789 → keep first 5 chars, mask 4, show last 4
-    assert _mask_phone("+628123456789") == "+6281****6789"
-
-
-def test_mask_phone_short():
-    result = _mask_phone("+1234")
-    assert "****" in result or result == "****"
-
-
-# ---------------------------------------------------------------------------
-# create_account
-# ---------------------------------------------------------------------------
-
-async def test_create_account_masks_phone(db_session: AsyncSession, user):
+async def test_create_account_stores_own_api_credentials(db_session: AsyncSession, user):
     service = AccountService(db_session)
-    acc = await service.create_account(user_id=user.id, phone_number=FAKE_PHONE)
+    acc = await service.create_or_reset_account(
+        user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
+    )
 
     assert acc.id is not None
-    assert acc.phone_masked is not None
-    assert FAKE_PHONE not in acc.phone_masked  # Never store raw phone
+    assert acc.api_id == FAKE_API_ID
+    # api_hash must be encrypted, never stored as plaintext
+    assert acc.api_hash_ciphertext is not None
+    assert acc.api_hash_ciphertext != FAKE_API_HASH
     assert acc.status == TelegramAccountStatus.DISCONNECTED
 
 
-# ---------------------------------------------------------------------------
-# start_auth — Telethon mocked
-# ---------------------------------------------------------------------------
-
-async def test_start_auth_returns_phone_code_hash(
-    db_session: AsyncSession, user, account, monkeypatch
-):
-    service = AccountService(db_session)
-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
-
-    mock_result = MagicMock()
-    mock_result.phone_code_hash = FAKE_HASH
-
-    mock_client = AsyncMock()
-    mock_client.connect = AsyncMock()
-    mock_client.send_code_request = AsyncMock(return_value=mock_result)
-    mock_client.disconnect = AsyncMock()
-
-    with patch.object(service, "_get_client", return_value=mock_client):
-        result = await service.start_auth(account.id, user.id, FAKE_PHONE)
-
-    assert result.phone_code_hash == FAKE_HASH
-    assert result.account_id == account.id
-
-
-async def test_start_auth_wrong_user_raises(
+async def test_create_account_rejects_second_account_for_same_user(
     db_session: AsyncSession, user, account
 ):
+    """account fixture already creates an ACTIVE account for `user`."""
     service = AccountService(db_session)
-    with pytest.raises(AccountNotFoundError):
-        await service.start_auth(account.id, user_id=9999, phone_number=FAKE_PHONE)
+    with pytest.raises(AccountAlreadyExistsError):
+        await service.create_or_reset_account(
+            user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
+        )
+
+
+async def test_create_account_allowed_after_disconnect(db_session: AsyncSession, user, account):
+    """Once the existing account is DISCONNECTED, it is RESET and reused —
+    the DB's UNIQUE constraint on user_id means a second row can never be
+    inserted for the same user; the same row id is reused instead."""
+    repo = TelegramAccountRepository(db_session)
+    await repo.update_status(account, TelegramAccountStatus.DISCONNECTED)
+
+    service = AccountService(db_session)
+    reset_acc = await service.create_or_reset_account(
+        user_id=user.id, api_id=FAKE_API_ID, api_hash=FAKE_API_HASH
+    )
+    assert reset_acc.id == account.id
+    assert reset_acc.api_id == FAKE_API_ID
+    # Any stale session from the previous connection must be cleared
+    assert reset_acc.session_ciphertext is None
 
 
 # ---------------------------------------------------------------------------
-# verify_code — Telethon mocked
+# perform_qr_login — happy path
 # ---------------------------------------------------------------------------
 
-async def test_verify_code_success(
-    db_session: AsyncSession, user, account, monkeypatch
-):
-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
+def _make_qr_login_mock(me_result, *, expire_once: bool = False, needs_2fa: bool = False):
+    """Build a mock Telethon qr_login() return value.
 
-    from app.core.config import get_settings
-    get_settings.cache_clear()
+    wait() behavior can be customized:
+      - expire_once: first call raises asyncio.TimeoutError, second succeeds
+      - needs_2fa: first call raises SessionPasswordNeededError
+    """
+    qr_login = MagicMock()
+    qr_login.url = "tg://login?token=FAKEQRTOKEN"
+    qr_login.recreate = AsyncMock()
 
-    service = AccountService(db_session)
+    calls = {"n": 0}
 
-    # Build a mock StringSession that save() returns our fake string
-    mock_session = MagicMock(spec=StringSession)
-    mock_session.save.return_value = FAKE_SESSION_STR
+    async def wait(timeout=None):
+        calls["n"] += 1
+        if expire_once and calls["n"] == 1:
+            raise asyncio.TimeoutError()
+        if needs_2fa and calls["n"] == 1:
+            raise SessionPasswordNeededError(request=None)
+        return me_result
 
-    mock_me = MagicMock()
-    mock_me.id = 987654321
-    mock_me.username = "testuser"
+    qr_login.wait = wait
+    return qr_login
+
+
+@pytest.fixture
+async def qr_account(db_session: AsyncSession, user):
+    """An account with its own api_id/api_hash already on file."""
+    from app.core.crypto import SessionCipher
+
+    repo = TelegramAccountRepository(db_session)
+    account = await repo.create(user_id=user.id, status=TelegramAccountStatus.DISCONNECTED)
+    cipher = SessionCipher.from_settings()
+    account = await repo.update(
+        account, api_id=FAKE_API_ID, api_hash_ciphertext=cipher.encrypt(FAKE_API_HASH)
+    )
+    return account
+
+
+async def test_perform_qr_login_success(db_session: AsyncSession, user, qr_account):
+    me = MagicMock(id=999, username="testuser")
+    qr_login_obj = _make_qr_login_mock(me)
 
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
-    mock_client.sign_in = AsyncMock()
-    mock_client.get_me = AsyncMock(return_value=mock_me)
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
     mock_client.disconnect = AsyncMock()
-    mock_client.session = mock_session
+    mock_client.session.save = MagicMock(return_value="fake_authenticated_session")
 
+    on_qr_ready = AsyncMock()
+    get_2fa_password = AsyncMock()
+
+    service = AccountService(db_session)
     with patch.object(service, "_get_client", return_value=mock_client):
-        updated_account = await service.verify_code(
-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
-            temp_session="fake_temp_session_string",
+        result = await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(on_qr_ready=on_qr_ready, get_2fa_password=get_2fa_password),
         )
 
-    assert updated_account.status == TelegramAccountStatus.ACTIVE
-    assert updated_account.session_ciphertext is not None
-    # Ciphertext must differ from the plaintext session string (i.e. it's encrypted)
-    assert updated_account.session_ciphertext != FAKE_SESSION_STR
-    assert len(updated_account.session_ciphertext) > 10  # Fernet ciphertext is always long
-    assert updated_account.telegram_user_id == 987654321
+    assert result.status == TelegramAccountStatus.ACTIVE
+    assert result.telegram_user_id == 999
+    assert result.username == "testuser"
+    assert result.session_ciphertext is not None
+    on_qr_ready.assert_awaited_once_with(qr_login_obj.url)
+    get_2fa_password.assert_not_awaited()
+    mock_client.disconnect.assert_awaited_once()
 
-    get_settings.cache_clear()
 
-
-async def test_verify_code_2fa(
-    db_session: AsyncSession, user, account, monkeypatch
+async def test_perform_qr_login_uses_account_own_credentials(
+    db_session: AsyncSession, user, qr_account
 ):
-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-
-    from app.core.config import get_settings
-    get_settings.cache_clear()
-
-    service = AccountService(db_session)
-
-    mock_session = MagicMock(spec=StringSession)
-    mock_session.save.return_value = FAKE_SESSION_STR
-
-    mock_me = MagicMock()
-    mock_me.id = 111
-    mock_me.username = "twofa_user"
+    """_get_client must be called with THIS account's api_id/api_hash, not globals."""
+    me = MagicMock(id=999, username="testuser")
+    qr_login_obj = _make_qr_login_mock(me)
 
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
-    # When password is provided, sign_in should be called directly with password
-    mock_client.sign_in = AsyncMock()
-    mock_client.get_me = AsyncMock(return_value=mock_me)
-    mock_client.disconnect = AsyncMock()
-    mock_client.session = mock_session
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+    mock_client.session.save = MagicMock(return_value="fake_session")
 
-    with patch.object(service, "_get_client", return_value=mock_client):
-        updated = await service.verify_code(
-            account.id, user.id, FAKE_PHONE, FAKE_CODE, FAKE_HASH,
-            temp_session="fake_temp_session_string", password="mypassword"
+    service = AccountService(db_session)
+    with patch.object(service, "_get_client", return_value=mock_client) as mock_get_client:
+        await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(
+                on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()
+            ),
         )
 
-    assert updated.status == TelegramAccountStatus.ACTIVE
-    # Verify password sign_in was called directly (no code sign-in attempt)
-    mock_client.sign_in.assert_called_once_with(password="mypassword")
-    get_settings.cache_clear()
+    _, kwargs = mock_get_client.call_args
+    assert kwargs["api_id"] == FAKE_API_ID
+    assert kwargs["api_hash"] == FAKE_API_HASH
 
 
-async def test_verify_code_wrong_code_raises(
-    db_session: AsyncSession, user, account, monkeypatch
+async def test_perform_qr_login_refreshes_expired_token(
+    db_session: AsyncSession, user, qr_account
 ):
-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
-
-    service = AccountService(db_session)
+    me = MagicMock(id=999, username="testuser")
+    qr_login_obj = _make_qr_login_mock(me, expire_once=True)
 
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
-    mock_client.sign_in = AsyncMock(side_effect=PhoneCodeInvalidError(request=None))
-    mock_client.disconnect = AsyncMock()
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+    mock_client.session.save = MagicMock(return_value="fake_session")
 
+    on_qr_ready = AsyncMock()
+
+    service = AccountService(db_session)
     with patch.object(service, "_get_client", return_value=mock_client):
-        with pytest.raises(AuthError, match="incorrect"):
-            await service.verify_code(
-                account.id, user.id, FAKE_PHONE, "99999", FAKE_HASH,
-                temp_session="fake_temp_session_string",
+        result = await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(on_qr_ready=on_qr_ready, get_2fa_password=AsyncMock()),
+        )
+
+    assert result.status == TelegramAccountStatus.ACTIVE
+    qr_login_obj.recreate.assert_awaited_once()
+    # Shown once initially, once again after refresh
+    assert on_qr_ready.await_count == 2
+
+
+async def test_perform_qr_login_handles_2fa(db_session: AsyncSession, user, qr_account):
+    me = MagicMock(id=999, username="testuser")
+    qr_login_obj = _make_qr_login_mock(me, needs_2fa=True)
+
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+    mock_client.sign_in = AsyncMock()
+    mock_client.get_me = AsyncMock(return_value=me)
+    mock_client.session.save = MagicMock(return_value="fake_session")
+
+    get_2fa_password = AsyncMock(return_value="my-2fa-password")
+
+    service = AccountService(db_session)
+    with patch.object(service, "_get_client", return_value=mock_client):
+        result = await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=get_2fa_password),
+        )
+
+    assert result.status == TelegramAccountStatus.ACTIVE
+    get_2fa_password.assert_awaited_once()
+    # sign_in must be called on the SAME still-connected client, not a new one
+    mock_client.sign_in.assert_awaited_once_with(password="my-2fa-password")
+
+
+async def test_perform_qr_login_times_out_if_never_scanned(
+    db_session: AsyncSession, user, qr_account, monkeypatch
+):
+    # Shrink the timeouts so the test doesn't actually take 5 minutes, but
+    # keep them > 0 so the while loop actually runs at least once.
+    monkeypatch.setattr(account_module, "QR_LOGIN_TOKEN_WAIT_SECONDS", 0.01)
+    monkeypatch.setattr(account_module, "QR_LOGIN_TOTAL_TIMEOUT_SECONDS", 0.01)
+
+    qr_login_obj = MagicMock()
+    qr_login_obj.url = "tg://login?token=NEVERSCANNED"
+    qr_login_obj.recreate = AsyncMock()
+
+    async def always_times_out(timeout=None):
+        raise asyncio.TimeoutError()
+
+    qr_login_obj.wait = always_times_out
+
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+
+    service = AccountService(db_session)
+    with patch.object(service, "_get_client", return_value=mock_client):
+        with pytest.raises(AuthTimeoutError):
+            await service.perform_qr_login(
+                account_id=qr_account.id,
+                user_id=user.id,
+                callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
             )
 
 
-# ---------------------------------------------------------------------------
-# load_session
-# ---------------------------------------------------------------------------
-
-async def test_load_session_decrypts_correctly(
-    db_session: AsyncSession, user, account, monkeypatch
-):
-    monkeypatch.setenv("SESSION_ENCRYPTION_KEY", valid_fernet_key())
-    monkeypatch.setenv("APP_SECRET_KEY", "test-secret")
-    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
-    monkeypatch.setenv("TELEGRAM_API_HASH", "testhash")
-    monkeypatch.setenv("BOT_TOKEN", "123456:test")
-
-    from app.core.config import get_settings
-    from app.core.crypto import SessionCipher
-    get_settings.cache_clear()
-
-    # Store an encrypted session
-    cipher = SessionCipher.from_settings()
-    ciphertext = cipher.encrypt(FAKE_SESSION_STR)
-
-    repo = TelegramAccountRepository(db_session)
-    await repo.update_session(account, session_ciphertext=ciphertext)
-
-    service = AccountService(db_session)
-    loaded = await service.load_session(account.id, user.id)
-
-    assert isinstance(loaded, StringSession)
-    assert loaded.save() == FAKE_SESSION_STR  # Decrypted correctly
-    get_settings.cache_clear()
-
-
-async def test_load_session_no_ciphertext_raises(
-    db_session: AsyncSession, user, account
-):
-    service = AccountService(db_session)
-    with pytest.raises(SessionError):
-        await service.load_session(account.id, user.id)
-
-
-async def test_load_session_wrong_user_raises(
-    db_session: AsyncSession, user, account
-):
+async def test_perform_qr_login_tenant_isolation(db_session: AsyncSession, qr_account):
+    """A different user_id must not be able to drive someone else's account."""
     service = AccountService(db_session)
     with pytest.raises(AccountNotFoundError):
-        await service.load_session(account.id, user_id=9999)
+        await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=qr_account.user_id + 99999,
+            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
+        )
 
 
 # ---------------------------------------------------------------------------
-# disconnect_account
+# get_account_api_credentials
+# ---------------------------------------------------------------------------
+
+async def test_get_account_api_credentials_decrypts(db_session: AsyncSession, qr_account):
+    service = AccountService(db_session)
+    api_id, api_hash = service.get_account_api_credentials(qr_account)
+    assert api_id == FAKE_API_ID
+    assert api_hash == FAKE_API_HASH
+
+
+async def test_get_account_api_credentials_missing_raises(db_session: AsyncSession, account):
+    """`account` fixture has no api_id/api_hash set."""
+    service = AccountService(db_session)
+    with pytest.raises(SessionError):
+        service.get_account_api_credentials(account)
+
+
+# ---------------------------------------------------------------------------
+# disconnect_account — unchanged behavior, still tenant-isolated
 # ---------------------------------------------------------------------------
 
 async def test_disconnect_account(db_session: AsyncSession, user, account):
     service = AccountService(db_session)
-    result = await service.disconnect_account(account.id, user.id)
+    result = await service.disconnect_account(account_id=account.id, user_id=user.id)
     assert result.status == TelegramAccountStatus.DISCONNECTED
+
+
+async def test_disconnect_account_tenant_isolation(db_session: AsyncSession, account):
+    service = AccountService(db_session)
+    with pytest.raises(AccountNotFoundError):
+        await service.disconnect_account(account_id=account.id, user_id=account.user_id + 99999)

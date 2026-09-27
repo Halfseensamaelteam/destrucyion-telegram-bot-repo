@@ -89,6 +89,9 @@ async def test_supervisor_skips_account_if_lock_taken(db_session, shared_redis, 
         phone_masked="+123",
         status=TelegramAccountStatus.ACTIVE,
         session_ciphertext=enc_session,
+        # CLAUDE.md §12.2: worker now requires per-account api_id/api_hash.
+        api_id=12345678,
+        api_hash_ciphertext=mock_cipher.encrypt("fake_api_hash_for_test"),
     )
     db_session.add(account)
     await db_session.commit()
