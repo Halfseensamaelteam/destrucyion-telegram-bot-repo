@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import tempfile
 from dataclasses import dataclass
 
 from app.core.logging import get_logger
@@ -140,7 +141,36 @@ class SavedMessagesService:
             ttl_seconds=record.ttl_seconds,
         )
 
-        # Strategy 1: forward (zero re-upload)
+        # Timed / self-destructing media: NEVER forward and NEVER re-send by
+        # file reference. Telegram refuses to forward it, and Telethon's
+        # reference re-send (utils.get_input_media) copies ttl_seconds onto
+        # the new message, so the "saved" copy would self-destruct too (or be
+        # rejected outright in Saved Messages). The only reliable way — and
+        # what the original Saveit.py does — is to download the bytes and
+        # upload them as a brand-new, non-timed file.
+        if record.ttl_seconds is not None:
+            try:
+                result = await self._try_resend(source_message, caption)
+                log.info(
+                    "saved_messages_download_uploaded",
+                    account_id=self._account_id,
+                    record_id=record.id,
+                    saved_msg_id=result.saved_message_id,
+                    strategy="download_upload_timed",
+                )
+                return result
+            except Exception as exc:
+                log.error(
+                    "saved_messages_timed_failed",
+                    account_id=self._account_id,
+                    record_id=record.id,
+                    error=str(exc),
+                )
+                raise SavedMessagesForwardError(
+                    f"Could not download and re-upload timed media: {exc}"
+                ) from exc
+
+        # Strategy 1: forward (zero re-upload) — normal, non-timed media only
         try:
             result = await self._try_forward(source_message, caption)
             log.info(
@@ -212,11 +242,12 @@ class SavedMessagesService:
 
     @with_flood_wait_retry(max_retries=3)
     async def _try_resend(self, source_message, caption: str) -> ForwardResult:
-        """Send media by file reference when forward is unavailable.
+        """Download the media, then upload it as a brand-new file.
 
-        Used when the source message has already disappeared (timed media)
-        or the chat has forward restrictions. This path requires the media
-        bytes to still be reachable via the file_reference in the session.
+        Same approach as the original Saveit.py (download_media -> send_file).
+        The re-uploaded file carries NO ttl_seconds, so it is a permanent
+        copy in Saved Messages. The download goes to a temporary directory
+        that is always removed afterwards — nothing is kept on local disk.
         """
         from telethon.tl.types import InputPeerSelf
 
@@ -224,11 +255,19 @@ class SavedMessagesService:
         if media is None:
             raise SavedMessagesForwardError("Source message has no media to resend")
 
-        sent = await self._client.send_file(
-            entity=InputPeerSelf(),
-            file=media,
-            caption=caption,
-        )
+        with tempfile.TemporaryDirectory(prefix="destrucyion_") as tmp_dir:
+            file_path = await self._client.download_media(source_message, file=tmp_dir)
+            if not file_path:
+                raise SavedMessagesForwardError(
+                    "Telegram did not return a downloadable file"
+                )
+
+            sent = await self._client.send_file(
+                entity=InputPeerSelf(),
+                file=file_path,
+                caption=caption,
+                force_document=True,
+            )
 
         return ForwardResult(
             saved_message_id=sent.id,

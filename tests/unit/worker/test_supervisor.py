@@ -251,3 +251,83 @@ async def test_all_states(manager):
     
     states = manager.all_states()
     assert states == {1: "RUNNING", 2: "ERROR"}
+
+
+# ---------------------------------------------------------------------------
+# sync_accounts — reconcile running clients with the DB without a restart.
+# Without this, the bot changing subscriptions/accounts (a separate process)
+# would only ever take effect after the worker is manually restarted.
+# ---------------------------------------------------------------------------
+
+async def test_sync_starts_newly_connected_account(manager):
+    acc = make_account(id=1)
+    with patch.object(manager, "_load_active_accounts", new_callable=AsyncMock) as m_load, \
+         patch.object(manager, "_check_subscription", new_callable=AsyncMock) as m_sub, \
+         patch.object(manager, "_start_account", new_callable=AsyncMock) as m_start:
+        m_load.return_value = [acc]
+        m_sub.return_value = True
+
+        await manager.sync_accounts()
+
+        m_start.assert_awaited_once_with(acc)
+
+
+async def test_sync_stops_disconnected_account(manager):
+    """An account that disappears from the ACTIVE list (user /disconnect'd)
+    must be stopped without waiting for a worker restart."""
+    managed = MagicMock()
+    manager._clients[1] = managed
+
+    with patch.object(manager, "_load_active_accounts", new_callable=AsyncMock) as m_load, \
+         patch.object(manager, "remove_account", new_callable=AsyncMock) as m_remove:
+        m_load.return_value = []  # no longer ACTIVE
+
+        await manager.sync_accounts()
+
+        m_remove.assert_awaited_once_with(1)
+
+
+async def test_sync_stops_account_with_expired_subscription(manager):
+    """CLAUDE.md §11/§18: an expired subscription must stop processing
+    automatically, without restarting the worker."""
+    acc = make_account(id=1)
+    manager._clients[1] = MagicMock()
+
+    with patch.object(manager, "_load_active_accounts", new_callable=AsyncMock) as m_load, \
+         patch.object(manager, "_check_subscription", new_callable=AsyncMock) as m_sub, \
+         patch.object(manager, "remove_account", new_callable=AsyncMock) as m_remove:
+        m_load.return_value = [acc]
+        m_sub.return_value = False  # expired
+
+        await manager.sync_accounts()
+
+        m_remove.assert_awaited_once_with(1)
+
+
+async def test_sync_leaves_already_running_account_alone(manager):
+    acc = make_account(id=1)
+    manager._clients[1] = MagicMock()
+
+    with patch.object(manager, "_load_active_accounts", new_callable=AsyncMock) as m_load, \
+         patch.object(manager, "_check_subscription", new_callable=AsyncMock) as m_sub, \
+         patch.object(manager, "_start_account", new_callable=AsyncMock) as m_start, \
+         patch.object(manager, "remove_account", new_callable=AsyncMock) as m_remove:
+        m_load.return_value = [acc]
+        m_sub.return_value = True
+
+        await manager.sync_accounts()
+
+        m_start.assert_not_called()
+        m_remove.assert_not_called()
+
+
+async def test_run_forever_syncs_periodically_then_stops(manager):
+    manager._sync_interval = 0.01
+    with patch.object(manager, "sync_accounts", new_callable=AsyncMock) as m_sync:
+        async def stop_soon():
+            await asyncio.sleep(0.05)
+            manager._stop_event.set()
+
+        await asyncio.gather(manager.run_forever(), stop_soon())
+
+        assert m_sync.await_count >= 1

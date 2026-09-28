@@ -96,6 +96,7 @@ class TelegramClientManager:
         cipher: SessionCipher | None = None,
         handler_factory: EventHandlerFactory | None = None,
         account_lock: object | None = None,  # AccountLock
+        sync_interval: float = 30.0,
     ) -> None:
         """
         Args:
@@ -110,7 +111,9 @@ class TelegramClientManager:
         self._session_factory = session_factory
         self._cipher = cipher or SessionCipher.from_settings()
         self._handler_factory = handler_factory
-        
+        # How often run_forever() reconciles running clients with the DB.
+        self._sync_interval = sync_interval
+
         # Load AccountLock. Fallback to singleton if not provided.
         if account_lock is None:
             from app.core.redis import get_redis_client
@@ -153,12 +156,65 @@ class TelegramClientManager:
         log.info("client_manager_stopped")
 
     async def run_forever(self) -> None:
-        """Block until stop() is called.
+        """Block until stop() is called, reconciling with the DB periodically.
 
-        In a real deployment this keeps the worker alive. Tests can call
-        stop() to exit this method.
+        The bot (a separate process) changes account/subscription state in
+        the database — /connect, /disconnect, admin grants, expiry. The
+        worker cannot be called by the bot directly, so while running it
+        re-reads the database every `sync_interval` seconds and starts/stops
+        clients to match (see sync_accounts).
         """
-        await self._stop_event.wait()
+        sync_task = asyncio.create_task(self._sync_loop(), name="account-sync")
+        try:
+            await self._stop_event.wait()
+        finally:
+            sync_task.cancel()
+            try:
+                await sync_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _sync_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._sync_interval)
+                return  # stop requested
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await self.sync_accounts()
+            except Exception as exc:  # never let one bad cycle kill the loop
+                log.error("account_sync_failed", error=str(exc))
+
+    async def sync_accounts(self) -> None:
+        """Make the running clients match the database.
+
+        - START a client for every ACTIVE account that has an active
+          subscription and is not running yet (new /connect, new grant).
+        - STOP a running client whose account is no longer ACTIVE
+          (/disconnect) or whose owner's subscription is no longer active
+          (expired / revoked) — CLAUDE.md §11 and §18.
+        """
+        desired = {a.id: a for a in await self._load_active_accounts()}
+
+        # Stop clients that should no longer run
+        for account_id in list(self._clients.keys()):
+            account = desired.get(account_id)
+            if account is None:
+                log.info("client_stopping_not_active", account_id=account_id)
+                await self.remove_account(account_id)
+            elif not await self._check_subscription(account.user_id):
+                log.info("client_stopping_subscription_inactive", account_id=account_id)
+                await self.remove_account(account_id)
+
+        # Start clients that should be running but are not
+        for account_id, account in desired.items():
+            if account_id in self._clients:
+                continue
+            if not await self._check_subscription(account.user_id):
+                log.debug("client_sync_skipped_no_subscription", account_id=account_id)
+                continue
+            await self._start_account(account)
 
     async def add_account(self, account: TelegramAccount) -> None:
         """Dynamically add and start a new account without restarting the manager.

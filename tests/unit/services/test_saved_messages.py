@@ -90,6 +90,18 @@ def make_client(forward_result_id=1234, send_result_id=5678) -> MagicMock:
     file_msg.id = send_result_id
     client.send_file = AsyncMock(return_value=file_msg)
 
+    # download_media writes a real file into the given directory (the service
+    # downloads into a TemporaryDirectory) and returns its path.
+    async def _fake_download(message, file=None):
+        import os
+
+        path = os.path.join(file, "media.bin")
+        with open(path, "wb") as fh:
+            fh.write(b"bytes")
+        return path
+
+    client.download_media = AsyncMock(side_effect=_fake_download)
+
     return client
 
 
@@ -273,7 +285,9 @@ async def test_caption_includes_timed_marker_for_timed_media():
         record=record,
     )
 
-    caption_arg = client.send_message.call_args.kwargs["message"]
+    # Timed media is downloaded and re-uploaded, so the caption travels with
+    # send_file (not as a follow-up send_message like the forward path).
+    caption_arg = client.send_file.call_args.kwargs["caption"]
     assert "Self-destructing" in caption_arg
     assert "10s" in caption_arg
 
@@ -297,3 +311,63 @@ async def test_caption_does_not_include_timed_marker_for_normal_media():
     caption_arg = client.send_message.call_args.kwargs["message"]
     assert "Self-destructing" not in caption_arg
     assert "⏱" not in caption_arg
+
+
+# ---------------------------------------------------------------------------
+# Tests: timed media must be DOWNLOADED and RE-UPLOADED (Saveit behaviour)
+# ---------------------------------------------------------------------------
+
+async def test_timed_media_is_downloaded_and_reuploaded_not_forwarded():
+    """Telegram refuses to forward timed media and Telethon's reference
+    re-send copies ttl_seconds — so timed media must go download -> upload."""
+    import os
+
+    client = make_client()
+    record = make_record(account_id=1)
+    record.ttl_seconds = 10
+
+    seen = {}
+
+    async def _capture_send_file(entity, file, caption, force_document):
+        seen["file"] = file
+        seen["existed_during_upload"] = os.path.exists(file)
+        seen["force_document"] = force_document
+        return MagicMock(id=5678)
+
+    client.send_file = AsyncMock(side_effect=_capture_send_file)
+
+    svc = SavedMessagesService(client, account_id=1)
+    result = await svc.forward(
+        make_message(),
+        sender_info=make_sender(),
+        chat_info=make_chat(),
+        record=record,
+    )
+
+    assert result.was_resent is True
+    assert result.saved_message_id == 5678
+    client.forward_messages.assert_not_called()
+    client.download_media.assert_awaited_once()
+    # A brand-new local FILE PATH is uploaded, not the original media object
+    assert isinstance(seen["file"], str)
+    assert seen["existed_during_upload"] is True
+    assert seen["force_document"] is True
+    # ...and nothing is left on disk afterwards
+    assert not os.path.exists(seen["file"])
+
+
+async def test_timed_media_failure_raises_forward_error():
+    client = make_client()
+    client.download_media = AsyncMock(return_value=None)
+    record = make_record(account_id=1)
+    record.ttl_seconds = 10
+
+    svc = SavedMessagesService(client, account_id=1)
+    with pytest.raises(SavedMessagesForwardError):
+        await svc.forward(
+            make_message(),
+            sender_info=make_sender(),
+            chat_info=make_chat(),
+            record=record,
+        )
+    client.send_file.assert_not_called()

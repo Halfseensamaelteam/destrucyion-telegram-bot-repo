@@ -10,6 +10,20 @@ Each account gets its own set of event handlers, bound to that account's
 context. Handlers are isolated — a crash in one account's handler
 does not affect other accounts.
 
+Two capture modes (mirroring the original Saveit.py):
+  - AUTOMATIC: every INCOMING message is inspected. By default only
+    timed/self-destructing media is saved (settings.capture_only_timed).
+  - MANUAL: the account owner replies to any media message with the trigger
+    text (settings.save_trigger, default ".saveit") to save it on demand.
+
+Important filters (regressions if removed):
+  - Automatic mode uses events.NewMessage(incoming=True). Without it the
+    handler also fires for OUR OWN outgoing messages — including the copy we
+    just uploaded to Saved Messages — which would re-capture and re-upload
+    it forever.
+  - Manual mode only matches OUTGOING messages, i.e. only the account owner
+    can trigger it.
+
 Design:
   - Handlers are pure functions of (event, context). No shared state.
   - DB sessions are created per-event from the session_factory.
@@ -22,12 +36,14 @@ Design:
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from telethon import events
 from telethon.tl.types import Message
 
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.capture import CaptureContext, MediaCaptureService
 from app.services.saved_messages import SavedMessagesForwardError, SavedMessagesService
@@ -54,15 +70,20 @@ def make_handler_factory(
 
     def handler_factory(manager, account_id: int) -> list:
         """Build handlers for a specific account's Telethon client."""
+        settings = get_settings()
+        only_timed = settings.capture_only_timed
+        trigger = (settings.save_trigger or "").strip()
 
-        async def on_new_message(event: events.NewMessage.Event) -> None:
-            """Fired for every new message received by this account."""
+        async def on_incoming_message(event: events.NewMessage.Event) -> None:
+            """AUTOMATIC mode: fired for every message this account RECEIVES."""
             try:
-                await _handle_message(
-                    event=event,
+                await _process_message(
+                    message=event.message,
                     account_id=account_id,
                     manager=manager,
                     session_factory=session_factory,
+                    force=False,
+                    capture_only_timed=only_timed,
                 )
             except Exception as exc:
                 log.error(
@@ -71,48 +92,136 @@ def make_handler_factory(
                     error=str(exc),
                 )
 
-        return [
-            (on_new_message, events.NewMessage()),
+        async def on_manual_save(event: events.NewMessage.Event) -> None:
+            """MANUAL mode: the account owner replied to a message with the trigger."""
+            try:
+                await _handle_manual_save(
+                    event=event,
+                    account_id=account_id,
+                    manager=manager,
+                    session_factory=session_factory,
+                )
+            except Exception as exc:
+                log.error(
+                    "manual_save_unhandled_error",
+                    account_id=account_id,
+                    error=str(exc),
+                )
+
+        handlers = [
+            # incoming=True is REQUIRED — see module docstring.
+            (on_incoming_message, events.NewMessage(incoming=True)),
         ]
+        if trigger:
+            handlers.append(
+                (
+                    on_manual_save,
+                    events.NewMessage(outgoing=True, pattern=rf"^{re.escape(trigger)}$"),
+                )
+            )
+        return handlers
 
     return handler_factory
 
 
-async def _handle_message(
+async def _notify_owner(client, text: str) -> None:
+    """Tell the account owner something via THEIR OWN Saved Messages.
+
+    Deliberately NOT sent into the original chat: in a private chat with the
+    person who sent the timed media, a visible "saving..." / error message
+    would alert them.
+    """
+    if client is None:
+        return
+    try:
+        await client.send_message("me", text)
+    except Exception:
+        pass  # best effort only
+
+
+async def _handle_manual_save(
     *,
     event: events.NewMessage.Event,
     account_id: int,
     manager,
     session_factory: Callable[[], AsyncSession],
 ) -> None:
-    """Process a single new message for a given account.
+    """Save the message the owner replied to (Saveit's `.saveit` behaviour)."""
+    client = manager.get_client(account_id)
 
-    1. Classify media (pure, no network).
-    2. If no capturable media → ignore silently.
-    3. Get account's user_id from the manager's client registry.
-    4. Create a DB session (isolated per event).
-    5. Build CaptureContext from message metadata.
-    6. Record via MediaCaptureService (idempotent).
-    7. Log result; forwarding to Saved Messages deferred to Phase 9.
+    replied = None
+    if event.reply_to_msg_id:
+        replied = await event.get_reply_message()
+
+    # The trigger is a command, not conversation — remove it (best effort).
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+    if replied is None:
+        await _notify_owner(client, "⚠️ Reply to a message with media to save it.")
+        return
+
+    if classify_message(replied) is None:
+        await _notify_owner(client, "⚠️ No supported media found in the replied message.")
+        return
+
+    outcome = await _process_message(
+        message=replied,
+        account_id=account_id,
+        manager=manager,
+        session_factory=session_factory,
+        force=True,
+        capture_only_timed=False,
+    )
+    if outcome == "failed":
+        await _notify_owner(
+            client,
+            "❌ Could not save that media (it may have expired or Telegram "
+            "refused the download). Check the worker logs for details.",
+        )
+    elif outcome == "duplicate":
+        await _notify_owner(client, "ℹ️ That media was already saved.")
+
+
+async def _process_message(
+    *,
+    message: Message,
+    account_id: int,
+    manager,
+    session_factory: Callable[[], AsyncSession],
+    force: bool,
+    capture_only_timed: bool,
+) -> str:
+    """Capture + save a single message for a given account.
+
+    Args:
+        force: True for manual saves — bypasses the timed-only filter and
+            retries a previously FAILED record.
+        capture_only_timed: If True, non-timed media is ignored.
+
+    Returns one of: "ignored", "saved", "duplicate", "failed".
     """
-    message: Message = event.message
-
-    # Step 1-2: classify
+    # Step 1-2: classify (pure, no network)
     media_info = classify_message(message)
     if media_info is None:
-        return
+        return "ignored"
+
+    # Automatic mode saves only timed media unless configured otherwise.
+    if capture_only_timed and not force and not media_info.is_self_destruct:
+        return "ignored"
 
     # Step 3: get user_id from manager's registry
     managed = manager._clients.get(account_id)
     if managed is None:
         log.warning("event_account_not_in_manager", account_id=account_id)
-        return
+        return "failed"
     user_id = managed.user_id
 
     # Capture context is built outside the DB session to keep network calls
     # (get_chat, get_sender) separate from the transaction.
     ctx, sender_info, chat_info = await _build_context(
-        event=event,
         message=message,
         account_id=account_id,
         user_id=user_id,
@@ -125,8 +234,13 @@ async def _handle_message(
         await session.commit()
 
     if not created:
-        log.debug("media_already_known", account_id=account_id, record_id=record.id)
-        return
+        from app.db.models.media_record import MediaRecordStatus
+
+        # A manual save may retry something that failed earlier; everything
+        # else that already exists is a true duplicate.
+        if not (force and record.status == MediaRecordStatus.FAILED):
+            log.debug("media_already_known", account_id=account_id, record_id=record.id)
+            return "duplicate"
 
     log.info(
         "media_captured",
@@ -135,9 +249,10 @@ async def _handle_message(
         media_type=record.media_type,
         ttl=record.ttl_seconds,
         is_timed=media_info.is_self_destruct,
+        manual=force,
     )
 
-    # Phase 9: forward to this account's own Saved Messages.
+    # Forward/upload to this account's own Saved Messages.
     # Routing invariant: client belongs to account_id — validated by manager.
     client = manager.get_client(account_id)
     if client is None:
@@ -150,7 +265,7 @@ async def _handle_message(
             capture_svc = MediaCaptureService(session)
             await capture_svc.mark_failed(record, error="Client not available for forwarding")
             await session.commit()
-        return
+        return "failed"
 
     fwd_svc = SavedMessagesService(client, account_id=account_id)
     try:
@@ -171,6 +286,7 @@ async def _handle_message(
             saved_msg_id=result.saved_message_id,
             was_resent=result.was_resent,
         )
+        return "saved"
     except SavedMessagesForwardError as fwd_err:
         log.error(
             "saved_messages_failed",
@@ -182,17 +298,22 @@ async def _handle_message(
             capture_svc = MediaCaptureService(session)
             await capture_svc.mark_failed(record, error=str(fwd_err))
             await session.commit()
+        return "failed"
 
 
 async def _build_context(
     *,
-    event: events.NewMessage.Event,
     message: Message,
     account_id: int,
     user_id: int,
     media_info,
 ) -> tuple[CaptureContext, SenderInfo, ChatInfo]:
-    """Extract all metadata from the Telethon event into a CaptureContext.
+    """Extract all metadata from the Telethon message into a CaptureContext.
+
+    Works from the Message itself (not the event) so it is correct for BOTH
+    automatic mode and manual mode — in manual mode the event is the owner's
+    own `.saveit` message, but the sender/chat we must record are those of
+    the message that was replied to.
 
     Returns (CaptureContext, SenderInfo, ChatInfo) so that the caller can
     pass SenderInfo/ChatInfo to SavedMessagesService without re-fetching.
@@ -200,12 +321,12 @@ async def _build_context(
     Uses app.telegram.metadata for robust sender/chat extraction.
     All failures are caught — metadata errors must never block capture.
     """
-    source_chat_id = event.chat_id
+    source_chat_id = message.chat_id
 
     # Chat metadata — best effort
     chat_obj = None
     try:
-        chat_obj = await event.get_chat()
+        chat_obj = await message.get_chat()
     except Exception:
         pass
 
@@ -214,7 +335,7 @@ async def _build_context(
     # Sender metadata — best effort
     sender_obj = None
     try:
-        sender_obj = await event.get_sender()
+        sender_obj = await message.get_sender()
     except Exception:
         pass
 

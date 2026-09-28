@@ -90,6 +90,27 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Media capture behaviour (mirrors the original Saveit.py options)
+    # ------------------------------------------------------------------
+    capture_only_timed: bool = Field(
+        default=True,
+        description=(
+            "If true (default), the worker automatically saves ONLY incoming "
+            "timed/self-destructing media (same as Saveit's AUTO_SAVE_TIMED). "
+            "If false, every incoming photo/video/document/voice is saved, "
+            "which floods Saved Messages in busy chats — not recommended."
+        ),
+    )
+    save_trigger: str = Field(
+        default=".saveit",
+        description=(
+            "Manual save command (Saveit's HANDLER). The account owner "
+            "replies to any media message with this text to save it, "
+            "regardless of capture_only_timed."
+        ),
+    )
+
+    # ------------------------------------------------------------------
     # Session encryption
     # ------------------------------------------------------------------
     session_encryption_key: SecretStr = Field(
