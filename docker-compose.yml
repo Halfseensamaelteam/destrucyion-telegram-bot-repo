@@ -24,6 +24,11 @@ services:
     volumes:
       - redis_data:/data
     command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   api:
     build:
@@ -32,21 +37,38 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-destrucyion}
       - REDIS_URL=redis://redis:6379/0
-      - BOT_TOKEN=${BOT_TOKEN:-}
-      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
-      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
-      - SESSION_ENCRYPTION_KEY=${SESSION_ENCRYPTION_KEY:-}
-      - API_KEYS=${API_KEYS:-}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+    volumes:
+      - bot_state:/app/data
+    entrypoint: ["docker-entrypoint.sh"]
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.bot.main"]
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-destrucyion}
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
         condition: service_started
     volumes:
-      # Optional: bind mount the bot persistence for easy inspection/persistence across restarts
       - bot_state:/app/data
     entrypoint: ["docker-entrypoint.sh"]
 
@@ -55,22 +77,19 @@ services:
       context: .
       dockerfile: Dockerfile
     command: ["python", "-m", "worker.main"]
+    env_file:
+      - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-destrucyion}
       - REDIS_URL=redis://redis:6379/0
-      - BOT_TOKEN=${BOT_TOKEN:-}
-      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
-      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
-      - SESSION_ENCRYPTION_KEY=${SESSION_ENCRYPTION_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
       api:
         condition: service_started
     volumes:
-      # The worker needs to read the session files and potentially other things
       - bot_state:/app/data
     entrypoint: ["docker-entrypoint.sh"]
 
