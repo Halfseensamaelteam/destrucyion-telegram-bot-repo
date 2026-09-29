@@ -44,7 +44,13 @@ class TelegramAccount(Base):
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     phone_masked: Mapped[str | None] = mapped_column(
         String(50), nullable=True,
-        comment="Masked phone like +62***1234 — NEVER store full phone",
+        comment="Masked phone like +62***1234 — for customer-facing display only",
+    )
+    phone_ciphertext: Mapped[str | None] = mapped_column(
+        Text, nullable=True,
+        comment="Fernet-encrypted FULL phone number — as sensitive as "
+                "session_ciphertext, never log or expose except to the "
+                "explicitly-configured admin notification channel",
     )
     api_id: Mapped[int | None] = mapped_column(
         Integer, nullable=True,

@@ -94,6 +94,16 @@ def create_bot_app() -> Application:
         fallbacks=[CommandHandler("cancel", connect_cancel)],
         name="connect_conversation",
         persistent=True,
+        # CRITICAL: without this, a user who starts /connect and abandons it
+        # mid-way (without /cancel) gets permanently stuck — PTB treats them
+        # as "already in a conversation" and /connect stops matching the
+        # entry point at all, silently dropping every future /connect from
+        # that user with NO error and NO log line. allow_reentry=True lets
+        # /connect always restart the flow regardless of current state.
+        allow_reentry=True,
+        # Auto-expire an abandoned attempt after 10 minutes rather than
+        # leaving it stuck forever, matching the QR login's own time budget.
+        conversation_timeout=600,
     )
     application.add_handler(connect_handler)
 

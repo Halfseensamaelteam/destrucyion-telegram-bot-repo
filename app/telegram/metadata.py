@@ -208,20 +208,31 @@ def build_caption(
     media_type: str,
     ttl_seconds: int | None = None,
     original_caption: str | None = None,
+    captured_at=None,
 ) -> str:
     """Build a Saved Messages caption for a captured media item.
 
     Format:
         📥 [Media type] from [sender] in [chat]
-        ⏱ Self-destructing (10s)   ← only for timed media
-        💬 [original caption]       ← only if present
+        🆔 Sender ID: 123456789 (@username)
+        ⏱ Self-destructing (10s) / View once   ← only for timed media
+        💬 [original caption]                    ← only if present
+        🕐 2026-09-28 16:33 WIB                  ← only if captured_at given
 
     Args:
         sender: Resolved SenderInfo.
         chat: Resolved ChatInfo.
         media_type: String like "photo", "video", etc.
         ttl_seconds: TTL for self-destructing media. None = not timed.
+            Telegram uses the sentinel 0x7FFFFFFF (2147483647) for
+            "View Once" media (self-destructs after being viewed, not
+            after a fixed duration) — this is displayed as "View once",
+            not literally as "(2147483647s)".
         original_caption: The original message caption if any.
+        captured_at: Optional timezone-aware datetime of capture. Rendered
+            using settings.display_timezone (CLAUDE.md — Telegram exposes
+            no per-user timezone, so this is an operator-configured display
+            timezone, not a per-viewer automatic one).
 
     Returns:
         A plain-text caption string.
@@ -240,10 +251,45 @@ def build_caption(
         f"{sender.identity_label} in {chat.display_label}"
     ]
 
+    if sender.telegram_id is not None:
+        id_line = f"🆔 Sender ID: {sender.telegram_id}"
+        if sender.username:
+            id_line += f" (@{sender.username})"
+        lines.append(id_line)
+
     if ttl_seconds is not None:
-        lines.append(f"⏱ Self-destructing ({ttl_seconds}s)")
+        # 0x7FFFFFFF = Telegram's sentinel for "view once" media — it has
+        # no fixed duration, it self-destructs after being opened.
+        if ttl_seconds >= 0x7FFFFFFF:
+            lines.append("⏱ Self-destructing (View once)")
+        else:
+            lines.append(f"⏱ Self-destructing ({ttl_seconds}s)")
 
     if original_caption:
         lines.append(f'💬 "{original_caption}"')
 
+    if captured_at is not None:
+        lines.append(f"🕐 {format_local_time(captured_at)}")
+
     return "\n".join(lines)
+
+
+def format_local_time(dt) -> str:
+    """Render a timezone-aware datetime using settings.display_timezone.
+
+    Telegram does not expose a per-user timezone anywhere in its API (Bot
+    API or MTProto) — there is no way to automatically know what timezone
+    a given Telegram user is in. This renders in a single operator-chosen
+    timezone (CLAUDE.md — DISPLAY_TIMEZONE, default UTC), which is the
+    closest honest equivalent of "automatic" formatting available.
+    """
+    from zoneinfo import ZoneInfo
+
+    from app.core.config import get_settings
+
+    tz_name = get_settings().display_timezone
+    try:
+        local_dt = dt.astimezone(ZoneInfo(tz_name))
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return dt.strftime("%Y-%m-%d %H:%M:%S UTC")

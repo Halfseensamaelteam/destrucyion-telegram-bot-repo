@@ -123,3 +123,27 @@ async def test_revoke_no_subscription_replies_error_without_commit():
 
     session.commit.assert_not_awaited()
     assert "❌" in update.message.reply_text.call_args.args[0]
+
+
+async def test_grant_lifetime_does_not_crash_on_none_expiry():
+    """Regression: lifetime plans have expires_at=None; grant used to
+    crash with AttributeError before replying to the admin at all."""
+    update = make_update()
+    session = MagicMock()
+    session.commit = AsyncMock()
+    target = MagicMock(id=1)
+    sub = MagicMock()
+    sub.expires_at = None
+
+    with patch("app.bot.handlers.admin.UserRepository") as MockUserRepo, \
+         patch("app.bot.handlers.admin.SubscriptionService") as MockSubSvc:
+        MockUserRepo.return_value.get_by_telegram_id = AsyncMock(return_value=target)
+        MockSubSvc.return_value.grant_subscription = AsyncMock(return_value=sub)
+
+        await raw_admin_command(
+            update, _make_context(["grant", "12345", "lifetime"]), session, MagicMock()
+        )
+
+    text = update.message.reply_text.call_args.args[0]
+    assert "Never" in text
+    session.commit.assert_awaited_once()

@@ -4,7 +4,7 @@ Unit tests for app.bot.handlers.start
 """
 
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -75,3 +75,28 @@ async def test_help_command_admin_user():
     args = update.message.reply_text.call_args[0][0]
     assert "Admin Commands" in args
     assert "/admin users" in args
+
+
+async def test_status_lifetime_subscription_does_not_crash():
+    """Regression: /status used to crash with AttributeError on lifetime
+    plans (expires_at=None), same root cause as /subscription and
+    /admin grant."""
+    from app.bot.handlers.start import status_command
+    from app.db.models.subscription import SubscriptionPlan
+
+    raw_status_command = status_command.__wrapped__
+    update = make_update()
+    session = MagicMock()
+    sub = MagicMock()
+    sub.plan = SubscriptionPlan.LIFETIME
+    sub.expires_at = None
+
+    with patch("app.bot.handlers.start.TelegramAccountRepository") as MockAcctRepo, \
+         patch("app.bot.handlers.start.SubscriptionRepository") as MockSubRepo:
+        MockAcctRepo.return_value.list_by_user = AsyncMock(return_value=[])
+        MockSubRepo.return_value.get_by_user_id = AsyncMock(return_value=sub)
+
+        await raw_status_command(update, MagicMock(), session, MagicMock(id=1))
+
+    text = update.message.reply_text.call_args.args[0]
+    assert "Never" in text

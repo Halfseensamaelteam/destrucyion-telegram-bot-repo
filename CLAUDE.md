@@ -558,6 +558,71 @@ Example caption:
 
 Never fabricate missing information. If username does not exist, use `Username: unavailable`.
 
+### 16.1 Automatic vs. manual capture (mirrors Saveit's HANDLER)
+
+Automatic capture only saves TIMED/self-destructing media by default
+(`CAPTURE_ONLY_TIMED=true`). The account owner can also reply to ANY media
+message with a manual trigger command (`SAVE_TRIGGER`, default `.saveit`,
+matching the original Saveit.py's `HANDLER`) to force-save it regardless of
+whether it is timed — including retrying a message that previously
+`FAILED`. The manual trigger only ever fires for the account owner's own
+outgoing messages; it must never be reachable by anyone else in the chat.
+
+### 16.2 Timestamp display timezone
+
+Telegram exposes no per-user timezone anywhere in its API (Bot API or
+MTProto) — there is no way to automatically detect what timezone a given
+Telegram user is in. All rendered timestamps (captions, admin
+notifications) use a single operator-configured `DISPLAY_TIMEZONE` (an
+IANA name, default `UTC`) rather than a true per-viewer automatic one.
+Do not claim or imply per-user automatic timezone detection anywhere in
+the UI copy.
+
+### 16.3 Admin notifications (operator's private channel)
+
+If `ADMIN_NOTIFY_CHAT_ID` is configured, every successfully captured media
+item ALSO sends a second, richer notification to that chat, separate from
+the customer-facing caption in their own Saved Messages:
+
+```
+🔔 New destructing media captured
+
+Sender (of the media):
+🆔 555666
+👤 John Doe (@greekwho)
+💬 Chat: Some Group
+📦 Type: photo | TTL: 10s
+
+Your customer (account owner):
+🆔 7231326415
+👤 @gigabasechad
+📱 +6281234567890          ← FULL number, see note below
+👑 Lifetime (Active) — never expires
+
+🕐 2026-09-28 16:33:00 UTC
+```
+
+**Explicit security decision — full phone number.** The connected
+customer's real, full phone number is decrypted and shown here, by
+deliberate operator choice, even though it remains masked
+(`phone_masked`) everywhere customer-facing. This is a narrower exposure
+than removing masking altogether: the full number is still encrypted at
+rest (`phone_ciphertext`, same `SessionCipher` as session/api_hash — never
+plaintext in the database) and is only ever decrypted to build this one
+notification, sent to this one operator-configured chat. It is never
+logged, never returned from any API endpoint, and never shown to the
+customer themselves or to any other user.
+
+There is no email field anywhere in this system — users authenticate only
+via Telegram, and no email-collection flow exists. Do not invent one to
+satisfy this notification; if email becomes a real requirement later, that
+is new scope (a `/setemail` flow or similar) and should go through its own
+phase, not be bolted onto this notification silently.
+
+A failure to send the admin notification (e.g. bot lacks permission in
+that chat) must never affect the actual capture/save outcome — it is
+strictly best-effort, logged and swallowed, never raised.
+
 ---
 
 ## 17. IDEMPOTENCY

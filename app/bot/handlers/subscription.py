@@ -32,11 +32,16 @@ async def subscription_command(
             "*(Payment gateway integration pending...)*"
         )
     else:
+        expires_line = (
+            "♾️ *Expires:* Never (Lifetime access)"
+            if subscription.expires_at is None
+            else f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
+        )
         text = (
             "👑 *Subscription Status*\n\n"
             f"🔹 *Plan:* {subscription.plan.value.title()}\n"
             f"🔹 *Status:* {subscription.status.value.title()}\n"
-            f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+            f"{expires_line}\n\n"
             "Thank you for using our service!"
         )
 

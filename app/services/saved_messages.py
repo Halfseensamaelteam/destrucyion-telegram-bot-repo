@@ -134,11 +134,14 @@ class SavedMessagesService:
         from telethon.tl.functions.messages import ForwardMessagesRequest
         from telethon.tl.types import InputPeerSelf
 
+        from datetime import datetime, timezone
+
         caption = build_caption(
             sender=sender_info,
             chat=chat_info,
             media_type=record.media_type.value,
             ttl_seconds=record.ttl_seconds,
+            captured_at=datetime.now(timezone.utc),
         )
 
         # Timed / self-destructing media: NEVER forward and NEVER re-send by

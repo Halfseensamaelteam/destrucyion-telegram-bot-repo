@@ -109,6 +109,26 @@ class Settings(BaseSettings):
             "regardless of capture_only_timed."
         ),
     )
+    display_timezone: str = Field(
+        default="UTC",
+        description=(
+            "IANA timezone name (e.g. 'Asia/Jakarta') used to render "
+            "capture timestamps in captions/notifications. Telegram does "
+            "not expose a per-user timezone anywhere in its API, so this "
+            "is a single operator-configured display timezone, not a "
+            "true per-viewer automatic one."
+        ),
+    )
+    admin_notify_chat_id: int | None = Field(
+        default=None,
+        description=(
+            "If set, every captured piece of media also triggers a richer "
+            "notification (sender identity + the connected customer's own "
+            "details and subscription) sent to this chat/channel via the "
+            "Bot API. The bot account must be a member/admin of that chat. "
+            "Leave unset to disable admin notifications entirely."
+        ),
+    )
 
     # ------------------------------------------------------------------
     # Session encryption

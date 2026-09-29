@@ -114,9 +114,14 @@ async def _admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, sessi
 
     sub = await SubscriptionService(session).grant_subscription(target.id, plan)
     await session.commit()
+    expires_line = (
+        "Never (Lifetime access)"
+        if sub.expires_at is None
+        else sub.expires_at.strftime("%Y-%m-%d %H:%M UTC")
+    )
     await update.message.reply_text(
         f"✅ Granted {plan.value} subscription to {args[0]}.\n"
-        f"Expires: {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        f"Expires: {expires_line}\n\n"
         "The worker picks this up within about 30 seconds."
     )
 

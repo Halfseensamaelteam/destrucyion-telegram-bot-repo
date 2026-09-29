@@ -341,3 +341,58 @@ Capture → Sender metadata → Saved Messages
 - Test duplicate messages.
 
 Only after this phase is the project considered production-ready.
+
+---
+
+## PHASE 19 — Post-Launch Fixes & Admin Notifications
+
+> Added after real-world testing surfaced bugs the original test suite
+> didn't cover (several bot handlers had zero test coverage — see
+> "Verify" below), plus a new operator-requested feature.
+
+**Bug fixes (all from real production use, not synthetic testing):**
+
+1. `/subscription`, `/status`, and `/admin grant` all crashed with
+   `AttributeError` on `lifetime` plans, because `expires_at` is `None`
+   for lifetime subscriptions by design, and `.strftime()` was called on
+   it unconditionally. Fixed to show "Never (Lifetime access)".
+2. `/connect` conversation could get a user permanently stuck: if they
+   started `/connect` and abandoned it mid-flow (no `/cancel`), every
+   future `/connect` from them silently matched nothing (PTB treats them
+   as "already in a conversation", and the persisted state survives bot
+   restarts). Fixed with `allow_reentry=True` and a
+   `conversation_timeout` on the ConversationHandler (requires the
+   `python-telegram-bot[job-queue]` extra).
+3. Media capture caption showed Telegram's `0x7FFFFFFF` (2147483647)
+   "view once" sentinel as a literal, nonsensical second count. Fixed to
+   display "View once".
+
+**New feature — Admin Notifications (CLAUDE.md §16.3):**
+
+`ADMIN_NOTIFY_CHAT_ID` — when configured, every captured media item also
+sends a richer, separate notification to the operator's own chat/channel,
+including the connected customer's full (decrypted) phone number and
+subscription details, by explicit operator decision. Requires:
+
+- New `phone_ciphertext` column (encrypted full phone number, captured
+  from Telethon's `me.phone` after a successful QR login — this works
+  even though the login itself never asks for a phone number, since it's
+  a property of the authenticated account).
+- `DISPLAY_TIMEZONE` setting for rendering timestamps (CLAUDE.md §16.2 —
+  there is no automatic per-user timezone available from Telegram).
+- `app/telegram/admin_notify.py` — sends via a standalone `telegram.Bot`
+  API client from the worker process, independent of the bot's own
+  long-polling `Application`.
+
+**Verify:**
+- `/subscription`, `/status`, `/admin grant ... lifetime` all reply
+  correctly instead of crashing silently.
+- Start `/connect`, abandon it (don't finish, don't `/cancel`), then send
+  `/connect` again — must restart cleanly, not go silent.
+- Trigger a real timed/view-once media capture; confirm the caption says
+  "View once", not a raw second count.
+- With `ADMIN_NOTIFY_CHAT_ID` set to a real chat the bot is a member of,
+  capture a media item and confirm the notification arrives with correct
+  sender info, customer info, full phone, and subscription detail.
+- With `ADMIN_NOTIFY_CHAT_ID` unset, confirm capture still works
+  end-to-end with zero notification attempts (no errors, no delay).

@@ -127,6 +127,8 @@ class TelegramAccountRepository:
         status: TelegramAccountStatus = TelegramAccountStatus.ACTIVE,
         api_id: int | None = None,
         api_hash_ciphertext: str | None = None,
+        phone_masked: str | None = None,
+        phone_ciphertext: str | None = None,
     ) -> TelegramAccount:
         """Store the encrypted session ciphertext after a successful login.
 
@@ -146,6 +148,10 @@ class TelegramAccountRepository:
             account.api_id = api_id
         if api_hash_ciphertext is not None:
             account.api_hash_ciphertext = api_hash_ciphertext
+        if phone_masked is not None:
+            account.phone_masked = phone_masked
+        if phone_ciphertext is not None:
+            account.phone_ciphertext = phone_ciphertext
         await self._session.flush()
         await self._session.refresh(account)
         return account

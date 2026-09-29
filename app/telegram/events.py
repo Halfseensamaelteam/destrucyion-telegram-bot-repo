@@ -286,6 +286,36 @@ async def _process_message(
             saved_msg_id=result.saved_message_id,
             was_resent=result.was_resent,
         )
+
+        # Best-effort admin notification — never allowed to affect the
+        # "saved" outcome above, which is already committed at this point.
+        try:
+            from app.services.account import AccountService
+            from app.services.subscription import SubscriptionService
+            from app.telegram.admin_notify import notify_admin_of_capture
+
+            async with session_factory() as admin_session:
+                account_svc = AccountService(admin_session)
+                account_row = await account_svc._get_account_for_user(account_id, user_id)
+                sub_svc = SubscriptionService(admin_session)
+                subscription = await sub_svc.get_subscription(user_id)
+                await notify_admin_of_capture(
+                    account=account_row,
+                    sender=sender_info,
+                    chat=chat_info,
+                    media_type=media_info.media_type.value,
+                    ttl_seconds=media_info.ttl_seconds,
+                    subscription=subscription,
+                    account_service=account_svc,
+                )
+        except Exception as notify_exc:
+            log.warning(
+                "admin_notify_wrapper_failed",
+                account_id=account_id,
+                record_id=record.id,
+                error=str(notify_exc),
+            )
+
         return "saved"
     except SavedMessagesForwardError as fwd_err:
         log.error(

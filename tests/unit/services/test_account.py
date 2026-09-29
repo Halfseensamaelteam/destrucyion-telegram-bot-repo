@@ -138,7 +138,7 @@ async def qr_account(db_session: AsyncSession, user):
 
 
 async def test_perform_qr_login_success(db_session: AsyncSession, user, qr_account):
-    me = MagicMock(id=999, username="testuser")
+    me = MagicMock(id=999, username="testuser", phone=None)
     qr_login_obj = _make_qr_login_mock(me)
 
     mock_client = AsyncMock()
@@ -171,7 +171,7 @@ async def test_perform_qr_login_uses_account_own_credentials(
     db_session: AsyncSession, user, qr_account
 ):
     """_get_client must be called with THIS account's api_id/api_hash, not globals."""
-    me = MagicMock(id=999, username="testuser")
+    me = MagicMock(id=999, username="testuser", phone=None)
     qr_login_obj = _make_qr_login_mock(me)
 
     mock_client = AsyncMock()
@@ -197,7 +197,7 @@ async def test_perform_qr_login_uses_account_own_credentials(
 async def test_perform_qr_login_refreshes_expired_token(
     db_session: AsyncSession, user, qr_account
 ):
-    me = MagicMock(id=999, username="testuser")
+    me = MagicMock(id=999, username="testuser", phone=None)
     qr_login_obj = _make_qr_login_mock(me, expire_once=True)
 
     mock_client = AsyncMock()
@@ -222,7 +222,7 @@ async def test_perform_qr_login_refreshes_expired_token(
 
 
 async def test_perform_qr_login_handles_2fa(db_session: AsyncSession, user, qr_account):
-    me = MagicMock(id=999, username="testuser")
+    me = MagicMock(id=999, username="testuser", phone=None)
     qr_login_obj = _make_qr_login_mock(me, needs_2fa=True)
 
     mock_client = AsyncMock()
@@ -339,7 +339,7 @@ async def test_try_resume_session_success(db_session: AsyncSession, user, qr_acc
     await repo.update(qr_account, session_ciphertext=cipher.encrypt("some_session_string"))
     await repo.update_status(qr_account, TelegramAccountStatus.DISCONNECTED)
 
-    me = MagicMock(id=999, username="testuser")
+    me = MagicMock(id=999, username="testuser", phone=None)
     mock_client = AsyncMock()
     mock_client.connect = AsyncMock()
     mock_client.is_user_authorized = AsyncMock(return_value=True)
@@ -389,3 +389,55 @@ async def test_try_resume_session_no_session_returns_false(db_session: AsyncSess
     service = AccountService(db_session)
     resumed = await service.try_resume_session(account_id=qr_account.id, user_id=user.id)
     assert resumed is False
+
+
+# ---------------------------------------------------------------------------
+# Phone capture on successful QR login (admin-notification feature)
+# ---------------------------------------------------------------------------
+
+async def test_qr_login_captures_and_encrypts_phone(db_session: AsyncSession, user, qr_account):
+    me = MagicMock(id=999, username="testuser", phone="6281234567890")
+    qr_login_obj = _make_qr_login_mock(me)
+
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+    mock_client.session.save = MagicMock(return_value="fake_session")
+
+    service = AccountService(db_session)
+    with patch.object(service, "_get_client", return_value=mock_client):
+        result = await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
+        )
+
+    # Masked version for customer-facing display
+    assert result.phone_masked == "628*******890"
+    # Full number never stored in plaintext
+    assert result.phone_ciphertext is not None
+    assert result.phone_ciphertext != "6281234567890"
+    # Only get_full_phone() (used solely by the admin notifier) decrypts it
+    assert service.get_full_phone(result) == "6281234567890"
+
+
+async def test_qr_login_without_phone_leaves_fields_none(db_session: AsyncSession, user, qr_account):
+    me = MagicMock(id=999, username="testuser", phone=None)
+    qr_login_obj = _make_qr_login_mock(me)
+
+    mock_client = AsyncMock()
+    mock_client.connect = AsyncMock()
+    mock_client.qr_login = AsyncMock(return_value=qr_login_obj)
+    mock_client.session.save = MagicMock(return_value="fake_session")
+
+    service = AccountService(db_session)
+    with patch.object(service, "_get_client", return_value=mock_client):
+        result = await service.perform_qr_login(
+            account_id=qr_account.id,
+            user_id=user.id,
+            callbacks=QrLoginCallbacks(on_qr_ready=AsyncMock(), get_2fa_password=AsyncMock()),
+        )
+
+    assert result.phone_masked is None
+    assert result.phone_ciphertext is None
+    assert service.get_full_phone(result) is None

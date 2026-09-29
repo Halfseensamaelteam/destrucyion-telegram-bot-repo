@@ -87,6 +87,13 @@ class SessionError(Exception):
     """Raised when a session cannot be loaded or decrypted."""
 
 
+def _mask_phone(phone: str) -> str:
+    """+6281234567890 -> +62********890 (keep country-code-ish prefix + last 3)."""
+    if len(phone) <= 6:
+        return "*" * len(phone)
+    return phone[:3] + "*" * (len(phone) - 6) + phone[-3:]
+
+
 @dataclass
 class QrLoginCallbacks:
     """Hooks the caller (bot handler) provides to drive the QR login UI.
@@ -105,6 +112,19 @@ class AccountService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._repo = TelegramAccountRepository(session)
+
+    def get_full_phone(self, account: TelegramAccount) -> str | None:
+        """Decrypt and return the FULL phone number for this account.
+
+        Sensitive — only ever call this to build the operator's own admin
+        notification (see app/telegram/admin_notify.py). Never log the
+        result, never surface it in any customer-facing reply.
+        """
+        if not account.phone_ciphertext:
+            return None
+        cipher = SessionCipher.from_settings()
+        return cipher.decrypt(account.phone_ciphertext)
+
 
     def _get_client(self, api_id: int, api_hash: str) -> TelegramClient:
         """Create a Telethon client using THIS ACCOUNT's own api_id/api_hash.
@@ -260,11 +280,16 @@ class AccountService:
         finally:
             await client.disconnect()
 
+        phone_masked = _mask_phone(me.phone) if me and me.phone else None
+        phone_ciphertext = cipher.encrypt(me.phone) if me and me.phone else None
+
         return await self._repo.update_session(
             account,
             session_ciphertext=session_ciphertext,
             telegram_user_id=me.id if me else None,
             username=me.username if me else None,
+            phone_masked=phone_masked,
+            phone_ciphertext=phone_ciphertext,
         )
 
     async def try_resume_session(self, account_id: int, user_id: int) -> bool:

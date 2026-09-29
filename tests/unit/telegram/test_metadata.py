@@ -321,3 +321,67 @@ def test_identity_label_id_fallback():
         is_channel=False,
     )
     assert sender.identity_label == "ID:12345"
+
+
+# ---------------------------------------------------------------------------
+# build_caption: view-once sentinel, telegram_id, and timestamp
+# ---------------------------------------------------------------------------
+
+def test_view_once_sentinel_shown_as_view_once_not_raw_seconds():
+    """Regression test: Telegram's 0x7FFFFFFF sentinel for view-once media
+    was previously shown literally as "(2147483647s)"."""
+    from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
+
+    sender = SenderInfo(telegram_id=1, username="greekwho", display_name=None,
+                          is_anonymous=False, is_channel=False)
+    chat = ChatInfo(chat_id=2, title=None, username="greekwho", is_group=False, is_channel=False, is_private=False)
+
+    caption = build_caption(sender, chat, "photo", ttl_seconds=2147483647)
+
+    assert "View once" in caption
+    assert "2147483647" not in caption
+
+
+def test_normal_timed_media_shows_seconds():
+    from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
+
+    sender = SenderInfo(telegram_id=1, username="greekwho", display_name=None,
+                          is_anonymous=False, is_channel=False)
+    chat = ChatInfo(chat_id=2, title=None, username="greekwho", is_group=False, is_channel=False, is_private=False)
+
+    caption = build_caption(sender, chat, "photo", ttl_seconds=10)
+
+    assert "(10s)" in caption
+
+
+def test_caption_includes_sender_telegram_id():
+    from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
+
+    sender = SenderInfo(telegram_id=555666, username="greekwho", display_name=None,
+                          is_anonymous=False, is_channel=False)
+    chat = ChatInfo(chat_id=2, title=None, username="greekwho", is_group=False, is_channel=False, is_private=False)
+
+    caption = build_caption(sender, chat, "photo")
+
+    assert "555666" in caption
+    assert "@greekwho" in caption
+
+
+def test_caption_includes_formatted_capture_time(monkeypatch):
+    import datetime
+
+    from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
+
+    monkeypatch.setenv("DISPLAY_TIMEZONE", "UTC")
+    from app.core.config import get_settings
+    get_settings.cache_clear()
+
+    sender = SenderInfo(telegram_id=1, username=None, display_name=None,
+                          is_anonymous=False, is_channel=False)
+    chat = ChatInfo(chat_id=2, title=None, username=None, is_group=False, is_channel=False, is_private=True)
+    when = datetime.datetime(2026, 9, 28, 16, 33, tzinfo=datetime.timezone.utc)
+
+    caption = build_caption(sender, chat, "photo", captured_at=when)
+
+    get_settings.cache_clear()
+    assert "2026-09-28 16:33" in caption

@@ -84,9 +84,14 @@ async def status_command(
 
     # Subscription Section
     if subscription:
+        expires_line = (
+            "♾️ Never (Lifetime access)"
+            if subscription.expires_at is None
+            else subscription.expires_at.strftime("%Y-%m-%d %H:%M UTC")
+        )
         status_text += (
             f"👑 *Subscription:* {subscription.plan.value.title()}\n"
-            f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"📅 *Expires:* {expires_line}\n"
         )
     else:
         status_text += "👑 *Subscription:* None (Free tier or expired)\n"
