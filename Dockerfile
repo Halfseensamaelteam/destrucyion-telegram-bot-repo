@@ -7,7 +7,6 @@ ENV UV_LINK_MODE=copy
 WORKDIR /app
 
 # Install dependencies first (for caching)
-# We use --no-install-project to only install dependencies
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
@@ -36,5 +35,8 @@ ENV PYTHONPATH="/app"
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Default command (can be overridden in docker-compose.yml)
+# Menjalankan script entrypoint saat container dinyalakan
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+# Default command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
