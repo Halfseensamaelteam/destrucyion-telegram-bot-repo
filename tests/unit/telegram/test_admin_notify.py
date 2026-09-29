@@ -41,14 +41,22 @@ def make_account_service(full_phone="6281234567890"):
 
 
 async def test_noop_when_admin_chat_not_configured(monkeypatch):
-    monkeypatch.delenv("ADMIN_NOTIFY_CHAT_ID", raising=False)
     from app.core.config import get_settings
-    get_settings.cache_clear()
+
+    # Ambil instance settings yang sedang aktif
+    cfg = get_settings()
+
+    # Cukup ubah field atribut Pydantic (huruf kecil) menjadi None
+    monkeypatch.setattr(cfg, "admin_notify_chat_id", None)
 
     with patch("app.telegram.admin_notify.Bot") as MockBot:
         await notify_admin_of_capture(
-            account=make_account(), sender=make_sender(), chat=make_chat(),
-            media_type="photo", ttl_seconds=10, subscription=None,
+            account=make_account(),
+            sender=make_sender(),
+            chat=make_chat(),
+            media_type="photo",
+            ttl_seconds=10,
+            subscription=None,
             account_service=make_account_service(),
         )
         MockBot.assert_not_called()

@@ -456,6 +456,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "asyncpg" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "httpx" },
@@ -491,10 +492,54 @@ sqlite = [
     { name = "aiosqlite" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "aiosqlite" },
+    { name = "alembic" },
+    { name = "annotated-doc" },
+    { name = "annotated-types" },
+    { name = "anyio" },
+    { name = "certifi" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'" },
+    { name = "click" },
+    { name = "cryptography" },
+    { name = "destrucyion-telegram-bot" },
+    { name = "fakeredis" },
+    { name = "fastapi" },
+    { name = "greenlet" },
+    { name = "h11" },
+    { name = "hiredis" },
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "idna" },
+    { name = "mako" },
+    { name = "markupsafe" },
+    { name = "pyaes" },
+    { name = "pyasn1" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "pydantic-settings" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
+    { name = "python-telegram-bot" },
+    { name = "redis" },
+    { name = "rsa" },
+    { name = "sqlalchemy" },
+    { name = "starlette" },
+    { name = "structlog" },
+    { name = "telethon" },
+    { name = "typing-extensions" },
+    { name = "typing-inspection" },
+    { name = "uvicorn" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.20.0" },
     { name = "alembic", specifier = ">=1.14.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "asyncpg", marker = "extra == 'full'", specifier = ">=0.30.0" },
     { name = "cryptography", specifier = ">=44.0.0" },
     { name = "fakeredis", marker = "extra == 'dev'", specifier = ">=2.26.0" },
@@ -521,6 +566,49 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'full'", specifier = ">=0.32.0" },
 ]
 provides-extras = ["full", "dev", "sqlite"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "aiosqlite", specifier = ">=0.22.1" },
+    { name = "alembic", specifier = "==1.19.2" },
+    { name = "annotated-doc", specifier = "==0.0.5" },
+    { name = "annotated-types", specifier = "==0.8.0" },
+    { name = "anyio", specifier = "==4.15.1" },
+    { name = "certifi", specifier = "==2026.7.22" },
+    { name = "cffi", marker = "platform_python_implementation != 'PyPy'", specifier = "==2.1.1" },
+    { name = "click", specifier = "==8.5.0" },
+    { name = "cryptography", specifier = "==50.0.1" },
+    { name = "destrucyion-telegram-bot", editable = "." },
+    { name = "fakeredis", specifier = ">=2.38.0" },
+    { name = "fastapi", specifier = "==0.141.1" },
+    { name = "greenlet", specifier = "==3.5.5" },
+    { name = "h11", specifier = "==0.16.0" },
+    { name = "hiredis", specifier = "==3.4.1" },
+    { name = "httpcore", specifier = "==1.0.9" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "idna", specifier = "==3.19" },
+    { name = "mako", specifier = "==1.4.1" },
+    { name = "markupsafe", specifier = "==3.0.3" },
+    { name = "pyaes", specifier = "==1.6.1" },
+    { name = "pyasn1", specifier = "==0.6.4" },
+    { name = "pycparser", marker = "implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'", specifier = "==3.0" },
+    { name = "pydantic", specifier = "==2.13.5" },
+    { name = "pydantic-core", specifier = "==2.46.5" },
+    { name = "pydantic-settings", specifier = "==2.15.0" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-asyncio", specifier = ">=1.4.0" },
+    { name = "python-dotenv", specifier = "==1.2.3" },
+    { name = "python-telegram-bot", specifier = "==22.8" },
+    { name = "redis", specifier = "==8.1.0" },
+    { name = "rsa", specifier = "==4.9.1" },
+    { name = "sqlalchemy", specifier = "==2.0.52" },
+    { name = "starlette", specifier = "==1.6.0" },
+    { name = "structlog", specifier = "==26.1.0" },
+    { name = "telethon", specifier = "==1.44.0" },
+    { name = "typing-extensions", specifier = "==4.16.0" },
+    { name = "typing-inspection", specifier = "==0.4.4" },
+    { name = "uvicorn", specifier = "==0.52.4" },
+]
 
 [[package]]
 name = "fakeredis"

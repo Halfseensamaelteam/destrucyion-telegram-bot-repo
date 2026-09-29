@@ -20,6 +20,7 @@ dependencies = [
     "slowapi>=0.1.10",
     "qrcode>=8.0",
     "Pillow>=10.0.0",
+    "asyncpg>=0.31.0",
 ]
 
 [project.optional-dependencies]
@@ -67,3 +68,54 @@ ignore = []
 python_version = "3.12"
 strict = false
 ignore_missing_imports = true
+
+[tool.uv.workspace]
+members = [
+    ".",
+]
+
+[tool.uv.sources]
+destrucyion-telegram-bot = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.1",
+    "alembic==1.19.2",
+    "annotated-doc==0.0.5",
+    "annotated-types==0.8.0",
+    "anyio==4.15.1",
+    "certifi==2026.7.22",
+    "cffi==2.1.1 ; platform_python_implementation != 'PyPy'",
+    "click==8.5.0",
+    "cryptography==50.0.1",
+    "destrucyion-telegram-bot",
+    "fakeredis>=2.38.0",
+    "fastapi==0.141.1",
+    "greenlet==3.5.5",
+    "h11==0.16.0",
+    "hiredis==3.4.1",
+    "httpcore==1.0.9",
+    "httpx==0.28.1",
+    "idna==3.19",
+    "mako==1.4.1",
+    "markupsafe==3.0.3",
+    "pyaes==1.6.1",
+    "pyasn1==0.6.4",
+    "pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "pydantic-settings==2.15.0",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "python-dotenv==1.2.3",
+    "python-telegram-bot==22.8",
+    "redis==8.1.0",
+    "rsa==4.9.1",
+    "sqlalchemy==2.0.52",
+    "starlette==1.6.0",
+    "structlog==26.1.0",
+    "telethon==1.44.0",
+    "typing-extensions==4.16.0",
+    "typing-inspection==0.4.4",
+    "uvicorn==0.52.4",
+]
