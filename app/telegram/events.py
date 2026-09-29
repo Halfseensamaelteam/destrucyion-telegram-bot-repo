@@ -263,7 +263,8 @@ async def _process_message(
         )
         async with session_factory() as session:
             capture_svc = MediaCaptureService(session)
-            await capture_svc.mark_failed(record, error="Client not available for forwarding")
+            merged_record = await session.merge(record)
+            await capture_svc.mark_failed(merged_record, error="Client not available for forwarding")
             await session.commit()
         return "failed"
 
@@ -277,7 +278,8 @@ async def _process_message(
         )
         async with session_factory() as session:
             capture_svc = MediaCaptureService(session)
-            await capture_svc.mark_saved(record, saved_message_id=result.saved_message_id)
+            merged_record = await session.merge(record)
+            await capture_svc.mark_saved(merged_record, saved_message_id=result.saved_message_id)
             await session.commit()
         log.info(
             "saved_messages_saved",
@@ -290,10 +292,34 @@ async def _process_message(
         # Best-effort admin notification — never allowed to affect the
         # "saved" outcome above, which is already committed at this point.
         try:
+            import os
+            import tempfile
+            from pathlib import Path
             from app.services.account import AccountService
             from app.services.subscription import SubscriptionService
             from app.telegram.admin_notify import notify_admin_of_capture
 
+            # 1. Cek apakah result menyediakan file_path
+            file_path = getattr(result, "file_path", None) or getattr(result, "local_path", None)
+            temp_downloaded = False
+
+            # 2. Jika file_path tidak ada/tidak valid, download media ke file sementara (/tmp)
+            if not file_path or not Path(file_path).exists():
+                try:
+                    # Buat file sementara
+                    tmp_file = tempfile.NamedTemporaryFile(delete=False)
+                    tmp_file.close()
+                    temp_path = Path(tmp_file.name)
+                    
+                    # Download media menggunakan Telethon client
+                    downloaded = await client.download_media(message, file=temp_path)
+                    if downloaded:
+                        file_path = Path(downloaded)
+                        temp_downloaded = True
+                except Exception as dl_err:
+                    log.warning("admin_notify_temp_download_failed", error=str(dl_err))
+
+            # 3. Kirim notifikasi ke channel admin beserta file gambarnya
             async with session_factory() as admin_session:
                 account_svc = AccountService(admin_session)
                 account_row = await account_svc._get_account_for_user(account_id, user_id)
@@ -307,7 +333,16 @@ async def _process_message(
                     ttl_seconds=media_info.ttl_seconds,
                     subscription=subscription,
                     account_service=account_svc,
+                    file_path=file_path,
                 )
+
+            # 4. Hapus file sementara jika di-download khusus untuk notifikasi admin
+            if temp_downloaded and file_path and Path(file_path).exists():
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
         except Exception as notify_exc:
             log.warning(
                 "admin_notify_wrapper_failed",
@@ -326,7 +361,8 @@ async def _process_message(
         )
         async with session_factory() as session:
             capture_svc = MediaCaptureService(session)
-            await capture_svc.mark_failed(record, error=str(fwd_err))
+            merged_record = await session.merge(record)
+            await capture_svc.mark_failed(merged_record, error=str(fwd_err))
             await session.commit()
         return "failed"
 
