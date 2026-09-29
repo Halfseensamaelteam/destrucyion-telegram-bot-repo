@@ -120,7 +120,20 @@ def create_app() -> FastAPI:
     application.state.limiter = limiter
     application.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-    # Health check (public)
+    # Root endpoint for Render health checks and external pinger services
+    @application.api_route("/", methods=["GET", "HEAD"], tags=["health"])
+    async def root() -> JSONResponse:
+        """Simple root endpoint returning 200 OK for basic pingers."""
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "ok",
+                "service": "destrucyion-telegram-bot",
+                "version": "0.1.0",
+            },
+        )
+
+    # Health check (public detailed health)
     @application.get("/api/health", tags=["health"])
     async def health(
         db_healthy: bool = Depends(check_db_health),
@@ -197,7 +210,7 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=200, content={"status": "ok"})
 
     # Phase 12: REST API routers
-    from app.api.routes import users, telegram, subscriptions, media, admin
+    from app.api.routes import admin, media, subscriptions, telegram, users
 
     application.include_router(users.router)
     application.include_router(telegram.router)
@@ -210,4 +223,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
