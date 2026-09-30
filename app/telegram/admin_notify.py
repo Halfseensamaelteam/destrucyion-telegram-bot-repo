@@ -96,6 +96,9 @@ async def notify_admin_of_capture(
     account_service,
     file_path: Path | str | None = None,
     thumbnail_path: Path | str | None = None,
+    duration: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
 ) -> None:
     """Send the operator's richer notification for a just-saved media item.
 
@@ -166,6 +169,10 @@ async def notify_admin_of_capture(
                                     caption=text,
                                     parse_mode="Markdown",
                                     thumbnail=thumb_file,
+                                    duration=int(duration) if duration is not None else None,
+                                    width=width,
+                                    height=height,
+                                    supports_streaming=True,
                                     read_timeout=300.0,
                                     write_timeout=300.0,
                                 )

@@ -222,6 +222,20 @@ async def _process_message(
         return "failed"
     user_id = managed.user_id
 
+    # Extract video metadata once for consistency
+    vid_duration = None
+    vid_width = None
+    vid_height = None
+    from telethon.tl.types import DocumentAttributeVideo
+    document = getattr(message, "document", None)
+    if document:
+        for attr in document.attributes:
+            if isinstance(attr, DocumentAttributeVideo):
+                vid_duration = int(attr.duration) if attr.duration else None
+                vid_width = attr.w if attr.w else None
+                vid_height = attr.h if attr.h else None
+                break
+
     # Capture context is built outside the DB session to keep network calls
     # (get_chat, get_sender) separate from the transaction.
     ctx, sender_info, chat_info = await _build_context(
@@ -386,6 +400,9 @@ async def _process_message(
                     account_service=account_svc,
                     file_path=file_path_obj,
                     thumbnail_path=thumb_path_obj,
+                    duration=vid_duration,
+                    width=vid_width,
+                    height=vid_height,
                 )
 
             # Clean up temporary directory & files

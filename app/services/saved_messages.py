@@ -250,7 +250,7 @@ class SavedMessagesService:
         copy in Saved Messages. The file path is returned in ForwardResult so
         other handlers (e.g., admin_notify) can use it before cleanup.
         """
-        from telethon.tl.types import InputPeerSelf
+        from telethon.tl.types import InputPeerSelf, DocumentAttributeVideo
 
         media = getattr(source_message, "media", None)
         if media is None:
@@ -264,13 +264,53 @@ class SavedMessagesService:
                     "Telegram did not return a downloadable file"
                 )
 
-            # Re-upload file ke Saved Messages sebagai foto/video asli (bukan document)
-            sent = await self._client.send_file(
-                entity=InputPeerSelf(),
-                file=file_path,
-                caption=caption,
-                supports_streaming=True,
-            )
+            # Extract video metadata for proper video attributes
+            video_attrs = None
+            thumb_path = None
+            
+            # Check if this is a video and extract metadata
+            document = getattr(source_message, "document", None)
+            if document:
+                for attr in document.attributes:
+                    if isinstance(attr, DocumentAttributeVideo):
+                        video_attrs = attr
+                        break
+            
+            # Download thumbnail if video
+            if video_attrs:
+                try:
+                    thumb_path = await self._client.download_media(
+                        source_message, thumb=-1, file=tmp_dir
+                    )
+                except Exception as e:
+                    log.warning("thumbnail_download_failed", error=str(e))
+
+            # Prepare send_file parameters
+            send_file_kwargs = {
+                "entity": InputPeerSelf(),
+                "file": file_path,
+                "caption": caption,
+                "supports_streaming": True,
+            }
+            
+            # Add video attributes if available
+            if video_attrs:
+                from telethon.tl.types import DocumentAttributeVideo
+                attrs = [
+                    DocumentAttributeVideo(
+                        duration=int(video_attrs.duration) if video_attrs.duration else 0,
+                        w=video_attrs.w if video_attrs.w else 0,
+                        h=video_attrs.h if video_attrs.h else 0,
+                        supports_streaming=True,
+                    )
+                ]
+                send_file_kwargs["attributes"] = attrs
+            
+            # Add thumbnail if downloaded
+            if thumb_path and os.path.exists(thumb_path):
+                send_file_kwargs["thumb"] = thumb_path
+
+            sent = await self._client.send_file(**send_file_kwargs)
 
             return ForwardResult(
                 saved_message_id=sent.id,
@@ -285,8 +325,17 @@ class SavedMessagesService:
                     os.remove(file_path)
                 except OSError:
                     pass
+            if 'thumb_path' in locals() and thumb_path and os.path.exists(thumb_path):
+                try:
+                    os.remove(thumb_path)
+                except OSError:
+                    pass
             if os.path.exists(tmp_dir):
                 try:
+                    for item in os.listdir(tmp_dir):
+                        item_path = os.path.join(tmp_dir, item)
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
                     os.rmdir(tmp_dir)
                 except OSError:
                     pass
