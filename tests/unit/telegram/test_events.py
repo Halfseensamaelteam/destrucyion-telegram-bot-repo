@@ -267,3 +267,62 @@ async def test_manual_save_failure_notifies_owner():
         )
     assert client.send_message.await_args.args[0] == "me"
     assert "Could not save" in client.send_message.await_args.args[1]
+
+
+async def test_process_message_cleans_up_temp_dir(tmp_path):
+    dummy_dir = tmp_path / "destrucyion_123"
+    dummy_dir.mkdir()
+    dummy_file = dummy_dir / "media.mp4"
+    dummy_file.write_bytes(b"content")
+
+    mock_msg = MagicMock()
+    mock_manager = MagicMock()
+    mock_client = AsyncMock()
+    mock_manager.get_client.return_value = mock_client
+    mock_manager._clients = {1: MagicMock(user_id=100)}
+
+    from app.services.saved_messages import ForwardResult
+    mock_fwd_result = ForwardResult(
+        saved_message_id=123,
+        caption_used="cap",
+        was_resent=True,
+        file_path=str(dummy_file),
+    )
+
+    with patch("app.telegram.events.classify_message") as mock_classify, \
+         patch("app.telegram.events._build_context") as mock_build_ctx, \
+         patch("app.telegram.events.MediaCaptureService") as mock_cap_svc, \
+         patch("app.telegram.events.SavedMessagesService") as mock_fwd_svc, \
+         patch("app.telegram.admin_notify.notify_admin_of_capture", new_callable=AsyncMock) as mock_notify, \
+         patch("app.services.account.AccountService") as mock_account_cls, \
+         patch("app.services.subscription.SubscriptionService") as mock_sub_cls:
+        
+        mock_account_cls.return_value._get_account_for_user = AsyncMock()
+        mock_sub_cls.return_value.get_subscription = AsyncMock()
+        mock_classify.return_value = MagicMock(is_self_destruct=True, media_type=MagicMock(value="video"), ttl_seconds=10)
+        mock_build_ctx.return_value = (MagicMock(), MagicMock(), MagicMock())
+        
+        mock_cap_instance = AsyncMock()
+        mock_cap_instance.record.return_value = (MagicMock(id=1, media_type=MagicMock(value="video"), ttl_seconds=10), True)
+        mock_cap_svc.return_value = mock_cap_instance
+        
+        mock_fwd_instance = AsyncMock()
+        mock_fwd_instance.forward.return_value = mock_fwd_result
+        mock_fwd_svc.return_value = mock_fwd_instance
+
+        mock_session_factory = MagicMock()
+        mock_session = AsyncMock()
+        mock_session_factory.return_value.__aenter__.return_value = mock_session
+
+        outcome = await ev._process_message(
+            message=mock_msg,
+            account_id=1,
+            manager=mock_manager,
+            session_factory=mock_session_factory,
+            force=True,
+            capture_only_timed=False,
+        )
+
+        assert outcome == "saved"
+        assert mock_notify.called
+        assert not dummy_dir.exists()

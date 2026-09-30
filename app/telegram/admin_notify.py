@@ -23,12 +23,14 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError, TimedOut
+from telegram.request import HTTPXRequest
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -60,7 +62,15 @@ def _get_bot() -> Bot | None:
         return None
 
     if _bot_singleton is None:
-        _bot_singleton = Bot(token=token)
+        # Menggunakan HTTPXRequest dengan timeout yang lebih tinggi (5 menit)
+        # untuk menangani upload video/media berukuran besar.
+        request = HTTPXRequest(
+            connect_timeout=60.0,
+            read_timeout=300.0,
+            write_timeout=300.0,
+            pool_timeout=60.0,
+        )
+        _bot_singleton = Bot(token=token, request=request)
     return _bot_singleton
 
 
@@ -124,51 +134,81 @@ async def notify_admin_of_capture(
 
     chat_id = _unwrap_secret(get_settings().admin_notify_chat_id)
 
-    try:
-        # Kirim file media jika path valid dan file ditemukan di lokal
-        if file_path:
-            path_obj = Path(file_path)
-            if path_obj.is_file():
-                with open(path_obj, "rb") as media_file:
-                    norm_media_type = (media_type or "").lower()
-                    if norm_media_type in ("photo", "image"):
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=media_file,
-                            caption=text,
-                            parse_mode="Markdown",
-                        )
-                    elif norm_media_type in ("video", "animation", "video_note"):
-                        await bot.send_video(
-                            chat_id=chat_id,
-                            video=media_file,
-                            caption=text,
-                            parse_mode="Markdown",
-                        )
-                    else:
-                        await bot.send_document(
-                            chat_id=chat_id,
-                            document=media_file,
-                            caption=text,
-                            parse_mode="Markdown",
-                        )
-                return
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Kirim file media jika path valid dan file ditemukan di lokal
+            if file_path:
+                path_obj = Path(file_path)
+                if path_obj.is_file():
+                    with open(path_obj, "rb") as media_file:
+                        norm_media_type = (media_type or "").lower()
+                        if norm_media_type in ("photo", "image"):
+                            await bot.send_photo(
+                                chat_id=chat_id,
+                                photo=media_file,
+                                caption=text,
+                                parse_mode="Markdown",
+                                read_timeout=300.0,
+                                write_timeout=300.0,
+                            )
+                        elif norm_media_type in ("video", "animation", "video_note"):
+                            await bot.send_video(
+                                chat_id=chat_id,
+                                video=media_file,
+                                caption=text,
+                                parse_mode="Markdown",
+                                read_timeout=300.0,
+                                write_timeout=300.0,
+                            )
+                        else:
+                            await bot.send_document(
+                                chat_id=chat_id,
+                                document=media_file,
+                                caption=text,
+                                parse_mode="Markdown",
+                                read_timeout=300.0,
+                                write_timeout=300.0,
+                            )
+                    return
 
-        # Fallback kirim pesan teks jika file_path tidak diberikan atau tidak ditemukan
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="Markdown",
-        )
-    except TelegramError as exc:
-        log.warning(
-            "admin_notify_failed",
-            error=str(exc),
-            account_id=account.id,
-        )
-    except Exception as exc:  # pragma: no cover — defensive only
-        log.error(
-            "admin_notify_unexpected_error",
-            error=str(exc),
-            account_id=account.id,
-        )
+            # Fallback kirim pesan teks jika file_path tidak diberikan atau tidak ditemukan
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+                read_timeout=60.0,
+            )
+            return
+
+        except (TimedOut, NetworkError) as exc:
+            if attempt < max_retries:
+                log.warning(
+                    "admin_notify_timeout_retry",
+                    error=str(exc),
+                    account_id=account.id,
+                    attempt=attempt,
+                )
+                await asyncio.sleep(3 * attempt)
+                continue
+            else:
+                log.warning(
+                    "admin_notify_failed_after_retries",
+                    error=str(exc),
+                    account_id=account.id,
+                )
+                break
+        except TelegramError as exc:
+            log.warning(
+                "admin_notify_failed",
+                error=str(exc),
+                account_id=account.id,
+            )
+            break
+        except Exception as exc:  # pragma: no cover — defensive only
+            log.error(
+                "admin_notify_unexpected_error",
+                error=str(exc),
+                account_id=account.id,
+            )
+            break

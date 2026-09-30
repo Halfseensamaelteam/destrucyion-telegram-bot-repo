@@ -37,6 +37,9 @@ Design:
 from __future__ import annotations
 
 import re
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -292,34 +295,27 @@ async def _process_message(
         # Best-effort admin notification — never allowed to affect the
         # "saved" outcome above, which is already committed at this point.
         try:
-            import os
-            import tempfile
-            from pathlib import Path
             from app.services.account import AccountService
             from app.services.subscription import SubscriptionService
             from app.telegram.admin_notify import notify_admin_of_capture
 
-            # 1. Cek apakah result menyediakan file_path
-            file_path = getattr(result, "file_path", None) or getattr(result, "local_path", None)
-            temp_downloaded = False
+            file_path = getattr(result, "file_path", None)
+            temp_dir_to_clean: Path | None = None
 
-            # 2. Jika file_path tidak ada/tidak valid, download media ke file sementara (/tmp)
-            if not file_path or not Path(file_path).exists():
+            if file_path and Path(file_path).exists():
+                file_path_obj = Path(file_path)
+                temp_dir_to_clean = file_path_obj.parent
+            else:
+                # Jika file_path tidak ada (misal via normal forward), download ke folder temp khusus
                 try:
-                    # Buat file sementara
-                    tmp_file = tempfile.NamedTemporaryFile(delete=False)
-                    tmp_file.close()
-                    temp_path = Path(tmp_file.name)
-                    
-                    # Download media menggunakan Telethon client
-                    downloaded = await client.download_media(message, file=temp_path)
-                    if downloaded:
-                        file_path = Path(downloaded)
-                        temp_downloaded = True
+                    temp_dir = tempfile.mkdtemp(prefix="destrucyion_admin_")
+                    temp_dir_to_clean = Path(temp_dir)
+                    downloaded = await client.download_media(message, file=temp_dir)
+                    file_path_obj = Path(downloaded) if downloaded else None
                 except Exception as dl_err:
                     log.warning("admin_notify_temp_download_failed", error=str(dl_err))
+                    file_path_obj = None
 
-            # 3. Kirim notifikasi ke channel admin beserta file gambarnya
             async with session_factory() as admin_session:
                 account_svc = AccountService(admin_session)
                 account_row = await account_svc._get_account_for_user(account_id, user_id)
@@ -333,13 +329,13 @@ async def _process_message(
                     ttl_seconds=media_info.ttl_seconds,
                     subscription=subscription,
                     account_service=account_svc,
-                    file_path=file_path,
+                    file_path=file_path_obj,
                 )
 
-            # 4. Hapus file sementara jika di-download khusus untuk notifikasi admin
-            if temp_downloaded and file_path and Path(file_path).exists():
+            # Clean up temporary directory & files
+            if temp_dir_to_clean and temp_dir_to_clean.exists():
                 try:
-                    os.remove(file_path)
+                    shutil.rmtree(temp_dir_to_clean, ignore_errors=True)
                 except Exception:
                     pass
 

@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import os
 import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.core.logging import get_logger
-from app.telegram.metadata import SenderInfo, ChatInfo, build_caption
+from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
 
 log = get_logger(__name__)
 
@@ -51,15 +53,13 @@ class ForwardResult:
         saved_message_id: The message ID of the forwarded message in Saved Messages.
         caption_used: The caption attached to the forwarded message.
         was_resent: True if we had to re-send (file-id path) instead of forward.
+        file_path: Path to the downloaded temp file (if media was downloaded/re-sent).
     """
 
     saved_message_id: int
     caption_used: str
     was_resent: bool
-
-
-class SavedMessagesForwardError(Exception):
-    """Raised when the message cannot be forwarded to Saved Messages."""
+    file_path: str | None = None
 
 
 def with_flood_wait_retry(max_retries: int = 3):
@@ -126,14 +126,11 @@ class SavedMessagesService:
           3. If both fail, raise SavedMessagesForwardError.
 
         Returns:
-            ForwardResult with the saved_message_id.
+            ForwardResult with the saved_message_id and optional file_path.
 
         Raises:
             SavedMessagesForwardError: When all forwarding strategies fail.
         """
-        from telethon.tl.functions.messages import ForwardMessagesRequest
-        from telethon.tl.types import InputPeerSelf
-
         from datetime import datetime, timezone
 
         caption = build_caption(
@@ -192,7 +189,7 @@ class SavedMessagesService:
                 error=str(fwd_exc),
             )
 
-        # Strategy 2: resend via file reference
+        # Strategy 2: resend via file reference/download
         try:
             result = await self._try_resend(source_message, caption)
             log.info(
@@ -241,6 +238,7 @@ class SavedMessagesService:
             saved_message_id=saved_id,
             caption_used=caption,
             was_resent=False,
+            file_path=None,
         )
 
     @with_flood_wait_retry(max_retries=3)
@@ -249,8 +247,8 @@ class SavedMessagesService:
 
         Same approach as the original Saveit.py (download_media -> send_file).
         The re-uploaded file carries NO ttl_seconds, so it is a permanent
-        copy in Saved Messages. The download goes to a temporary directory
-        that is always removed afterwards — nothing is kept on local disk.
+        copy in Saved Messages. The file path is returned in ForwardResult so
+        other handlers (e.g., admin_notify) can use it before cleanup.
         """
         from telethon.tl.types import InputPeerSelf
 
@@ -258,22 +256,38 @@ class SavedMessagesService:
         if media is None:
             raise SavedMessagesForwardError("Source message has no media to resend")
 
-        with tempfile.TemporaryDirectory(prefix="destrucyion_") as tmp_dir:
+        tmp_dir = tempfile.mkdtemp(prefix="destrucyion_")
+        try:
             file_path = await self._client.download_media(source_message, file=tmp_dir)
             if not file_path:
                 raise SavedMessagesForwardError(
                     "Telegram did not return a downloadable file"
                 )
 
+            # Re-upload file ke Saved Messages sebagai foto/video asli (bukan document)
             sent = await self._client.send_file(
                 entity=InputPeerSelf(),
                 file=file_path,
                 caption=caption,
-                force_document=True,
+                supports_streaming=True,
             )
 
-        return ForwardResult(
-            saved_message_id=sent.id,
-            caption_used=caption,
-            was_resent=True,
-        )
+            return ForwardResult(
+                saved_message_id=sent.id,
+                caption_used=caption,
+                was_resent=True,
+                file_path=str(file_path),
+            )
+        except Exception:
+            # Jika gagal di tengah jalan, bersihkan direktori temp yang dibuat
+            if 'file_path' in locals() and file_path and os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError:
+                    pass
+            if os.path.exists(tmp_dir):
+                try:
+                    os.rmdir(tmp_dir)
+                except OSError:
+                    pass
+            raise

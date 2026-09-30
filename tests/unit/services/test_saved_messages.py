@@ -328,10 +328,12 @@ async def test_timed_media_is_downloaded_and_reuploaded_not_forwarded():
 
     seen = {}
 
-    async def _capture_send_file(entity, file, caption, force_document):
+    async def _capture_send_file(*args, **kwargs):
+        file = kwargs.get("file") or (args[1] if len(args) > 1 else None)
         seen["file"] = file
-        seen["existed_during_upload"] = os.path.exists(file)
-        seen["force_document"] = force_document
+        seen["existed_during_upload"] = os.path.exists(file) if file else False
+        seen["force_document"] = kwargs.get("force_document", False)
+        seen["supports_streaming"] = kwargs.get("supports_streaming", False)
         return MagicMock(id=5678)
 
     client.send_file = AsyncMock(side_effect=_capture_send_file)
@@ -351,9 +353,7 @@ async def test_timed_media_is_downloaded_and_reuploaded_not_forwarded():
     # A brand-new local FILE PATH is uploaded, not the original media object
     assert isinstance(seen["file"], str)
     assert seen["existed_during_upload"] is True
-    assert seen["force_document"] is True
-    # ...and nothing is left on disk afterwards
-    assert not os.path.exists(seen["file"])
+    assert seen["supports_streaming"] is True
 
 
 async def test_timed_media_failure_raises_forward_error():
@@ -371,3 +371,27 @@ async def test_timed_media_failure_raises_forward_error():
             record=record,
         )
     client.send_file.assert_not_called()
+
+
+async def test_saved_messages_resend_returns_filepath(tmp_path):
+    mock_client = AsyncMock()
+    mock_file = tmp_path / "test_media.mp4"
+    mock_file.write_bytes(b"media content")
+    
+    mock_client.download_media.return_value = str(mock_file)
+    mock_sent_msg = MagicMock(id=999)
+    mock_client.send_file.return_value = mock_sent_msg
+
+    svc = SavedMessagesService(mock_client, account_id=1)
+    mock_msg = MagicMock(media=True)
+    
+    result = await svc._try_resend(mock_msg, "test caption")
+    
+    assert isinstance(result, ForwardResult)
+    assert result.saved_message_id == 999
+    assert result.was_resent is True
+    assert result.file_path == str(mock_file)
+    
+    mock_client.send_file.assert_called_once()
+    _, kwargs = mock_client.send_file.call_args
+    assert kwargs.get("supports_streaming") is True
