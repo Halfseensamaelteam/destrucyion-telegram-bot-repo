@@ -95,6 +95,7 @@ async def notify_admin_of_capture(
     subscription,
     account_service,
     file_path: Path | str | None = None,
+    thumbnail_path: Path | str | None = None,
 ) -> None:
     """Send the operator's richer notification for a just-saved media item.
 
@@ -153,14 +154,24 @@ async def notify_admin_of_capture(
                                 write_timeout=300.0,
                             )
                         elif norm_media_type in ("video", "animation", "video_note"):
-                            await bot.send_video(
-                                chat_id=chat_id,
-                                video=media_file,
-                                caption=text,
-                                parse_mode="Markdown",
-                                read_timeout=300.0,
-                                write_timeout=300.0,
-                            )
+                            thumb_file = None
+                            try:
+                                if thumbnail_path:
+                                    thumb_path_obj = Path(thumbnail_path)
+                                    if thumb_path_obj.is_file():
+                                        thumb_file = open(thumb_path_obj, "rb")
+                                await bot.send_video(
+                                    chat_id=chat_id,
+                                    video=media_file,
+                                    caption=text,
+                                    parse_mode="Markdown",
+                                    thumbnail=thumb_file,
+                                    read_timeout=300.0,
+                                    write_timeout=300.0,
+                                )
+                            finally:
+                                if thumb_file is not None:
+                                    thumb_file.close()
                         else:
                             await bot.send_document(
                                 chat_id=chat_id,

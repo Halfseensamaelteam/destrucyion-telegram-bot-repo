@@ -304,17 +304,72 @@ async def _process_message(
 
             if file_path and Path(file_path).exists():
                 file_path_obj = Path(file_path)
+                # Pastikan ekstensi file sesuai agar Telegram Bot API mengenali format
+                media_type_val = media_info.media_type.value.lower()
+                if media_type_val in ("video", "animation", "video_note") and file_path_obj.suffix.lower() != ".mp4":
+                    new_path = file_path_obj.with_suffix(".mp4")
+                    file_path_obj.rename(new_path)
+                    file_path_obj = new_path
+                elif media_type_val in ("photo", "image") and file_path_obj.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                    new_path = file_path_obj.with_suffix(".jpg")
+                    file_path_obj.rename(new_path)
+                    file_path_obj = new_path
                 temp_dir_to_clean = file_path_obj.parent
+                # Download thumbnail jika ini video
+                thumb_path_obj: Path | None = None
+                if media_type_val in ("video", "animation", "video_note"):
+                    try:
+                        downloaded_thumb = await client.download_media(message, thumb=-1, file=str(temp_dir_to_clean))
+                        if downloaded_thumb:
+                            thumb_raw = Path(downloaded_thumb)
+                            if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
+                                thumb_new = thumb_raw.with_suffix(".jpg")
+                                thumb_raw.rename(thumb_new)
+                                thumb_path_obj = thumb_new
+                            else:
+                                thumb_path_obj = thumb_raw
+                    except Exception as thumb_err:
+                        log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
             else:
                 # Jika file_path tidak ada (misal via normal forward), download ke folder temp khusus
                 try:
                     temp_dir = tempfile.mkdtemp(prefix="destrucyion_admin_")
                     temp_dir_to_clean = Path(temp_dir)
                     downloaded = await client.download_media(message, file=temp_dir)
-                    file_path_obj = Path(downloaded) if downloaded else None
+                    if downloaded:
+                        file_path_raw = Path(downloaded)
+                        media_type_val = media_info.media_type.value.lower()
+                        if media_type_val in ("video", "animation", "video_note") and file_path_raw.suffix.lower() != ".mp4":
+                            new_path = file_path_raw.with_suffix(".mp4")
+                            file_path_raw.rename(new_path)
+                            file_path_raw = new_path
+                        elif media_type_val in ("photo", "image") and file_path_raw.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                            new_path = file_path_raw.with_suffix(".jpg")
+                            file_path_raw.rename(new_path)
+                            file_path_raw = new_path
+                        file_path_obj = file_path_raw
+                        # Download thumbnail
+                        thumb_path_obj: Path | None = None
+                        if media_type_val in ("video", "animation", "video_note"):
+                            try:
+                                downloaded_thumb = await client.download_media(message, thumb=-1, file=temp_dir)
+                                if downloaded_thumb:
+                                    thumb_raw = Path(downloaded_thumb)
+                                    if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
+                                        thumb_new = thumb_raw.with_suffix(".jpg")
+                                        thumb_raw.rename(thumb_new)
+                                        thumb_path_obj = thumb_new
+                                    else:
+                                        thumb_path_obj = thumb_raw
+                            except Exception as thumb_err:
+                                log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
+                    else:
+                        file_path_obj = None
+                        thumb_path_obj = None
                 except Exception as dl_err:
                     log.warning("admin_notify_temp_download_failed", error=str(dl_err))
                     file_path_obj = None
+                    thumb_path_obj = None
 
             async with session_factory() as admin_session:
                 account_svc = AccountService(admin_session)
@@ -330,6 +385,7 @@ async def _process_message(
                     subscription=subscription,
                     account_service=account_svc,
                     file_path=file_path_obj,
+                    thumbnail_path=thumb_path_obj,
                 )
 
             # Clean up temporary directory & files

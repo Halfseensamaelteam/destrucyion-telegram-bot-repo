@@ -274,12 +274,18 @@ async def test_process_message_cleans_up_temp_dir(tmp_path):
     dummy_dir.mkdir()
     dummy_file = dummy_dir / "media.mp4"
     dummy_file.write_bytes(b"content")
+    # Buat file thumbnail dummy agar bisa direname
+    dummy_thumb = dummy_dir / "thumb.jpg"
+    dummy_thumb.write_bytes(b"thumb content")
 
     mock_msg = MagicMock()
     mock_manager = MagicMock()
     mock_client = AsyncMock()
     mock_manager.get_client.return_value = mock_client
     mock_manager._clients = {1: MagicMock(user_id=100)}
+
+    # download_media dipanggil dua kali: satu untuk media, satu untuk thumbnail
+    mock_client.download_media = AsyncMock(side_effect=[str(dummy_thumb), str(dummy_thumb)])
 
     from app.services.saved_messages import ForwardResult
     mock_fwd_result = ForwardResult(
@@ -296,16 +302,16 @@ async def test_process_message_cleans_up_temp_dir(tmp_path):
          patch("app.telegram.admin_notify.notify_admin_of_capture", new_callable=AsyncMock) as mock_notify, \
          patch("app.services.account.AccountService") as mock_account_cls, \
          patch("app.services.subscription.SubscriptionService") as mock_sub_cls:
-        
+
         mock_account_cls.return_value._get_account_for_user = AsyncMock()
         mock_sub_cls.return_value.get_subscription = AsyncMock()
         mock_classify.return_value = MagicMock(is_self_destruct=True, media_type=MagicMock(value="video"), ttl_seconds=10)
         mock_build_ctx.return_value = (MagicMock(), MagicMock(), MagicMock())
-        
+
         mock_cap_instance = AsyncMock()
         mock_cap_instance.record.return_value = (MagicMock(id=1, media_type=MagicMock(value="video"), ttl_seconds=10), True)
         mock_cap_svc.return_value = mock_cap_instance
-        
+
         mock_fwd_instance = AsyncMock()
         mock_fwd_instance.forward.return_value = mock_fwd_result
         mock_fwd_svc.return_value = mock_fwd_instance
@@ -326,3 +332,4 @@ async def test_process_message_cleans_up_temp_dir(tmp_path):
         assert outcome == "saved"
         assert mock_notify.called
         assert not dummy_dir.exists()
+

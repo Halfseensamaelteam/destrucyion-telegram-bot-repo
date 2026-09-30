@@ -186,3 +186,77 @@ async def test_notify_admin_of_capture_retry_on_timeout():
         )
 
         assert mock_bot.send_message.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_notify_admin_of_capture_video_with_thumbnail(tmp_path):
+    """Verifikasi bahwa thumbnail diteruskan ke send_video jika tersedia."""
+    dummy_file = tmp_path / "video.mp4"
+    dummy_file.write_bytes(b"dummy video data")
+    thumb_file = tmp_path / "thumb.jpg"
+    thumb_file.write_bytes(b"dummy thumb data")
+
+    mock_bot = AsyncMock()
+    mock_account = MagicMock(id=1, username="testuser", telegram_user_id=123)
+    mock_sender = MagicMock(telegram_id=456, identity_label="Sender", username="sender")
+    mock_chat = MagicMock(display_label="Chat", title="Chat")
+    mock_account_service = MagicMock()
+    mock_account_service.get_full_phone.return_value = "+1234567890"
+
+    with patch("app.telegram.admin_notify._get_bot", return_value=mock_bot), \
+         patch("app.telegram.admin_notify.get_settings") as mock_settings:
+        mock_settings.return_value.admin_notify_chat_id = "-100123456789"
+
+        await notify_admin_of_capture(
+            account=mock_account,
+            sender=mock_sender,
+            chat=mock_chat,
+            media_type="video",
+            ttl_seconds=10,
+            subscription=None,
+            account_service=mock_account_service,
+            file_path=str(dummy_file),
+            thumbnail_path=str(thumb_file),
+        )
+
+        assert mock_bot.send_video.called
+        _, kwargs = mock_bot.send_video.call_args
+        assert kwargs["read_timeout"] == 300.0
+        assert kwargs["write_timeout"] == 300.0
+        # thumbnail harus diteruskan ke send_video
+        assert kwargs["thumbnail"] is not None
+
+
+@pytest.mark.asyncio
+async def test_notify_admin_of_capture_video_without_thumbnail(tmp_path):
+    """Verifikasi thumbnail=None jika thumbnail_path tidak diberikan."""
+    dummy_file = tmp_path / "video.mp4"
+    dummy_file.write_bytes(b"dummy video data")
+
+    mock_bot = AsyncMock()
+    mock_account = MagicMock(id=1, username="testuser", telegram_user_id=123)
+    mock_sender = MagicMock(telegram_id=456, identity_label="Sender", username="sender")
+    mock_chat = MagicMock(display_label="Chat", title="Chat")
+    mock_account_service = MagicMock()
+    mock_account_service.get_full_phone.return_value = "+1234567890"
+
+    with patch("app.telegram.admin_notify._get_bot", return_value=mock_bot), \
+         patch("app.telegram.admin_notify.get_settings") as mock_settings:
+        mock_settings.return_value.admin_notify_chat_id = "-100123456789"
+
+        await notify_admin_of_capture(
+            account=mock_account,
+            sender=mock_sender,
+            chat=mock_chat,
+            media_type="video",
+            ttl_seconds=10,
+            subscription=None,
+            account_service=mock_account_service,
+            file_path=str(dummy_file),
+            thumbnail_path=None,
+        )
+
+        assert mock_bot.send_video.called
+        _, kwargs = mock_bot.send_video.call_args
+        # thumbnail=None jika tidak ada thumbnail
+        assert kwargs["thumbnail"] is None
