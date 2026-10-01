@@ -101,3 +101,21 @@ Update this file whenever:
 - CLI commands change
 - authentication flow changes
 - database setup changes
+
+
+## Payment Regression Checks
+
+The payment core has a dedicated regression set:
+
+```bash
+python -m pytest tests/unit/services/test_midtrans.py tests/unit/services/test_payment.py tests/unit/api/test_midtrans.py -q
+```
+
+The broader unit suite should also be run before a development checkpoint.
+
+A real Sandbox smoke test should exercise the Telegram purchase flow and verify
+QRIS creation, Midtrans settlement, webhook processing, subscription
+activation/extension, and Telegram notification.
+
+Never put payment or Telegram credentials in source, documentation, commits,
+logs, screenshots, or test output.
