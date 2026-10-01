@@ -186,3 +186,22 @@ python -m app.bot.main
 ```
 
 This is only for development - production uses webhook mode on Vercel.
+
+## Midtrans Webhook Deployment
+
+When Midtrans notifications are enabled, the notification endpoint must be
+publicly reachable by Midtrans. The application should expose the configured
+notification route through the deployment's public HTTPS URL.
+
+Development may use a temporary HTTPS tunnel. Production must use the stable
+public deployment URL configured in Midtrans.
+
+The webhook must retain its server-side signature and payment amount
+validation. Do not expose or log the Server Key.
+
+## Payment Environment Separation
+
+Sandbox and production credentials are separate. Development/testing uses
+Sandbox and `is_production=False`. Production deployment must use the
+production configuration deliberately and only when production credentials
+and deployment settings have been explicitly prepared.
