@@ -69,3 +69,18 @@ Redis · Pydantic v2 · pytest · uv · Docker
 ## License
 
 _Not yet decided._
+
+
+## Payment & Subscription Validation Checkpoint
+
+As of 2026-10-01, the subscription payment core has been validated in
+Midtrans Sandbox and through the Telegram bot flow.
+
+Validated behavior includes QRIS creation, payment persistence, webhook
+signature validation, settlement-driven subscription activation, duplicate
+settlement protection, subscription extension, Lifetime non-expiration, WIB
+display, and Telegram activation notification.
+
+Before changing prices, plans, payment methods, subscription UI, webhook
+handling, or subscription logic, read
+`docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`.
