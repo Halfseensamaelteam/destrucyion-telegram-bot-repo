@@ -162,3 +162,31 @@ worker/
 ```
 
 See `CLAUDE.md` for full database schema, API surface, and security rules.
+
+
+## Payment & Subscription Boundary
+
+Payment and subscription are separate domain concerns:
+
+```
+Telegram subscription UI
+        ↓
+PaymentService
+   ├── MidtransService → Midtrans
+   └── PaymentRepository → PostgreSQL
+                              ↑
+                       Midtrans webhook
+                              ↓
+                    verified settlement
+                              ↓
+                    SubscriptionService
+                              ↓
+                    Telegram notification
+```
+
+`Payment.expiry_time` is the QRIS/payment deadline. It must never be
+treated as `Subscription.expires_at`, which represents premium access
+expiry.
+
+Settlement is authoritative: a client-side claim of successful payment never
+activates a subscription.
