@@ -122,3 +122,25 @@ Documentation-only changes are acceptable when intentionally requested.
 Temporary downloadable artifacts should use a temporary branch and must not
 alter production behavior.
 
+
+
+## Payment & Subscription Core Protection
+
+Before changing subscription pricing, plans, UI, payment methods, payment
+persistence, webhook behavior, or subscription logic, read
+`docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md` and
+`docs/PAYMENTS-MIDTRANS.MD`.
+
+Protected behavior includes:
+
+- Sandbox `is_production=False`.
+- QRIS `acquirer=gopay`.
+- Server-side webhook signature verification.
+- Payment amount validation.
+- Settlement idempotency.
+- Weekly 7-day and Monthly 30-day durations.
+- Lifetime without expiration.
+- Active finite subscription extension from existing `expires_at`.
+- Separate payment expiry and subscription expiry.
+
+Do not refactor this core for unrelated feature requests.
