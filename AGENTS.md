@@ -75,3 +75,50 @@ alembic upgrade head
 - `docs/INITIAL-AUDIT.md` — Phase 0 deliverable (audit of the original repo).
 - `docs/TERMUX.md` — Phase 2 deliverable (verified Termux setup).
 - `.agents/rules/project.md` — condensed rules for Antigravity's rules system.
+
+
+## Payment & Subscription Core Protection
+
+The validated payment/subscription implementation is a protected contract.
+
+Before changing subscription prices, adding plans, changing subscription UI,
+or adding another payment method, read:
+
+`docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`
+
+### Protected behavior
+
+- Midtrans Sandbox must use `is_production=False`.
+- QRIS must retain `"acquirer": "gopay"`.
+- `Payment.expiry_time` is payment/QRIS expiry, not subscription expiry.
+- Webhook signature verification must not be weakened or bypassed.
+- Settlement must remain idempotent.
+- Payment amount and order ID validation must remain server-side.
+- Weekly = 7 days.
+- Monthly = 30 days.
+- Lifetime = no expiration.
+- Active finite subscriptions extend from the existing active `expires_at`,
+  not from the current time.
+- Existing validated behavior must remain intact when adding UI, prices,
+  plans, or payment methods.
+
+### Change control
+
+1. Prefer the smallest possible change.
+2. Do not refactor unrelated payment/subscription code.
+3. Do not infer permission to modify protected core from a request to change a
+   price, plan, UI, or payment method.
+4. Protected-core changes require an explicit request identifying the intended
+   behavior change.
+5. Run the relevant regression tests after payment/subscription changes.
+6. Never place credentials or secrets in source, documentation, commits, logs,
+   screenshots, or test output.
+
+### Production repository safety
+
+The `main` branch of this repository is used as a production deployment
+source. Avoid speculative or temporary runtime changes on `main`.
+Documentation-only changes are acceptable when intentionally requested.
+Temporary downloadable artifacts should use a temporary branch and must not
+alter production behavior.
+
