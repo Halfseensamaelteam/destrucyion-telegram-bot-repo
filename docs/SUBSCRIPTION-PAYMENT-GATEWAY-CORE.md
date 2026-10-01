@@ -301,3 +301,7 @@ The current implementation has been tested through the Midtrans Sandbox flow, in
 Treat these behaviors as **validated contracts**.
 
 Future feature work should build around these contracts rather than silently changing them.
+
+## 8. Current Validation Checkpoint
+
+As of 2026-10-01, the protected flow has passed the focused payment/webhook regression suite and a real Midtrans Sandbox Telegram purchase through settlement, subscription extension, and activation notification.
