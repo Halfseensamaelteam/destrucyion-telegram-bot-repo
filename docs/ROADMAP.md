@@ -396,3 +396,49 @@ subscription details, by explicit operator decision. Requires:
   sender info, customer info, full phone, and subscription detail.
 - With `ADMIN_NOTIFY_CHAT_ID` unset, confirm capture still works
   end-to-end with zero notification attempts (no errors, no delay).
+
+---
+
+## PHASE 20 — Payment & Subscription Core Hardening
+
+**Goal:** Lock the validated Midtrans QRIS and subscription behavior before
+future feature work changes prices, plans, UI, or payment methods.
+
+**Required reading:**
+- `docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`
+- `CLAUDE.md` payment/subscription protection rules
+- `AGENTS.md` change-control rules
+
+**Protected behavior:**
+- Midtrans Sandbox uses `is_production=False`.
+- QRIS charge requests retain `"acquirer": "gopay"`.
+- Payment expiry and subscription expiry remain separate concepts.
+- Webhook signature verification must remain intact.
+- Settlement must remain idempotent.
+- Finite subscriptions extend from an existing active `expires_at`.
+- Weekly = 7 days, Monthly = 30 days, Lifetime = no expiration.
+- User-facing subscription expiry remains displayed in WIB where configured by
+  the current application behavior.
+
+**Regression verification:**
+- [ ] QRIS transaction creation succeeds in Sandbox.
+- [ ] Invalid webhook signature is rejected.
+- [ ] Gross amount mismatch is rejected.
+- [ ] Settlement activates the subscription.
+- [ ] Repeated settlement does not grant the subscription twice.
+- [ ] Active Weekly purchase extends the existing expiry by 7 days.
+- [ ] Active Monthly purchase extends the existing expiry by 30 days.
+- [ ] Lifetime remains non-expiring.
+- [ ] Payment expiry is not used as subscription expiry.
+- [ ] Telegram activation notification shows the finite expiry correctly.
+- [ ] No protected payment code was refactored for unrelated feature work.
+
+**Change-control rule:**
+
+Price changes, new plans, UI changes, and additional payment methods should be
+implemented around the validated core. A request for one of those changes does
+not automatically authorize changes to authentication, webhook verification,
+settlement, payment persistence, or subscription-extension logic.
+
+**STOP:** Do not proceed with unrelated payment/subscription feature work until
+this protection contract and its relevant regression checks are understood.
