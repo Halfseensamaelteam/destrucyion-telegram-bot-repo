@@ -442,3 +442,10 @@ settlement, payment persistence, or subscription-extension logic.
 
 **STOP:** Do not proceed with unrelated payment/subscription feature work until
 this protection contract and its relevant regression checks are understood.
+
+
+## Current Checkpoint — 2026-10-01
+
+The payment and subscription core is validated for the current development checkpoint. Focused regression tests passed (`10 passed`), the broader unit suite passed (`252 passed`), and a real Midtrans Sandbox Telegram purchase completed through QRIS creation, settlement, subscription extension, and activation notification.
+
+The validated payment/subscription core is protected. Price, plan, UI, and additional-payment-method requests do not automatically authorize changes to payment authentication, webhook verification, settlement, persistence, or subscription-extension logic.
