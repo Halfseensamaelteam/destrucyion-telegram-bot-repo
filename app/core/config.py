@@ -174,6 +174,10 @@ class Settings(BaseSettings):
         default=SecretStr(""),
         description="Midtrans Server Key. Never expose this value.",
     )
+    midtrans_is_production: bool = Field(
+        default=False,
+        description="Use Midtrans production API endpoints. Keep false for Sandbox.",
+    )
     midtrans_notification_url: str = Field(
         default="",
         description="Public URL where Midtrans sends payment notifications.",

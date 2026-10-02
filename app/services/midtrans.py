@@ -28,7 +28,7 @@ class MidtransService:
             raise MidtransError("Midtrans Server Key is not configured.")
 
         self._client = midtransclient.CoreApi(
-            is_production=False,
+            is_production=settings.midtrans_is_production,
             server_key=server_key,
         )
 

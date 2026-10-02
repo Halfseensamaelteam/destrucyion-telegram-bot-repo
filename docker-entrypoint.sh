@@ -1,22 +1,48 @@
 #!/bin/bash
 set -e
 
-# 1. Jalankan migrasi database NeonDB
-echo "==> Running database migrations..."
-alembic upgrade head
+SERVICE_ROLE="${SERVICE_ROLE:-web}"
 
-# 2. Jalankan Bot Telegram di background
-echo "==> Starting Telegram Bot (app.bot.main)..."
-python -m app.bot.main &
+run_migrations() {
+    echo "==> Running database migrations..."
+    alembic upgrade head
+}
 
-# 3. Jalankan Worker Telethon di background
-echo "==> Starting Worker (worker.main)..."
-python -m worker.main &
+start_bot() {
+    echo "==> Starting Telegram Bot..."
+    python -m app.bot.main &
+}
 
-# 4. Jalankan Web Service FastAPI di foreground
-echo "==> Starting FastAPI Web Service..."
-if [ $# -gt 0 ]; then
-    exec "$@"
-else
-    exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
-fi
+start_worker() {
+    echo "==> Starting Worker..."
+    python -m worker.main &
+}
+
+start_web() {
+    echo "==> Starting FastAPI Web Service on port ${PORT:-8000}..."
+    exec uvicorn app.main:app --host 0.0.0.0 --port "${PORT:-8000}"
+}
+
+case "$SERVICE_ROLE" in
+    web)
+        run_migrations
+        start_web
+        ;;
+    bot)
+        python -m app.bot.main
+        ;;
+    worker)
+        python -m worker.main
+        ;;
+    all)
+        run_migrations
+        start_bot
+        start_worker
+        start_web
+        ;;
+    *)
+        echo "ERROR: Unsupported SERVICE_ROLE: $SERVICE_ROLE"
+        echo "Expected one of: web, bot, worker, all"
+        exit 1
+        ;;
+esac
