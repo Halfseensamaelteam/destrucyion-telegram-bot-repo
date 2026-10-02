@@ -2,13 +2,12 @@
 app.bot.handlers.subscription
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Subscription commands: /subscription
-
-This is an ordinary customer-facing command — any authenticated application
-user may check their OWN subscription status. It must NOT be admin-only.
 """
 
+from datetime import timedelta, timezone
+
 from sqlalchemy.ext.asyncio import AsyncSession
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.bot.dependencies import with_db_and_user
@@ -18,32 +17,85 @@ from app.db.repositories.subscription_repo import SubscriptionRepository
 
 @with_db_and_user
 async def subscription_command(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    session: AsyncSession,
+    user: User,
 ) -> None:
-    """Handle /subscription command. Shows current active subscription."""
+    """Handle /subscription command. Shows current subscription status."""
+
     repo = SubscriptionRepository(session)
     subscription = await repo.get_by_user_id(user.id)
 
     if not subscription:
         text = (
-            "👑 *Subscription Status*\n\n"
-            "You do not have an active subscription.\n"
-            "You are currently on the Free tier. Upgrade to Premium to connect more accounts and increase storage limits.\n\n"
-            "*(Payment gateway integration pending...)*"
-        )
-    else:
-        expires_line = (
-            "♾️ *Expires:* Never (Lifetime access)"
-            if subscription.expires_at is None
-            else f"📅 *Expires:* {subscription.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
-        )
-        text = (
-            "👑 *Subscription Status*\n\n"
-            f"🔹 *Plan:* {subscription.plan.value.title()}\n"
-            f"🔹 *Status:* {subscription.status.value.title()}\n"
-            f"{expires_line}\n\n"
-            "Thank you for using our service!"
+            "⭐ *Status Langganan*\n\n"
+            "Anda tidak memiliki langganan aktif.\n"
+            "Saat ini Anda berada pada paket *Free*.\n\n"
+            "Pilih paket Premium di bawah ini:"
         )
 
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🗓️ Weekly — IDR 8,000",
+                    callback_data="subscription_buy_weekly",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📅 Monthly — IDR 30,000",
+                    callback_data="subscription_buy_monthly",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "👑 Lifetime — IDR 2,000,000",
+                    callback_data="subscription_buy_lifetime",
+                )
+            ],
+        ]
+
+        if update.message:
+            await update.message.reply_text(
+                text,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+
+        return
+
+    if subscription.expires_at is None:
+        expires_line = "⏳ *Masa Berlaku:* Selamanya (Akses Lifetime)"
+    else:
+        wib = timezone(timedelta(hours=7))
+        expires_wib = subscription.expires_at.astimezone(wib)
+
+        expires_line = (
+            f"⏳ *Masa Berlaku:* "
+            f"{expires_wib.strftime('%Y-%m-%d %H:%M WIB')}"
+        )
+
+    text = (
+        "⭐ *Status Langganan*\n\n"
+        f"📦 *Paket:* {subscription.plan.value.title()}\n"
+        f"🟢 *Status:* {subscription.status.value.title()}\n"
+        f"{expires_line}\n\n"
+        "Terima kasih telah menggunakan layanan kami!"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "➕ Tambahkan Plan",
+                callback_data="subscription_add_plan",
+            )
+        ]
+    ]
+
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )

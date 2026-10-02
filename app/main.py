@@ -210,13 +210,14 @@ def create_app() -> FastAPI:
         return JSONResponse(status_code=200, content={"status": "ok"})
 
     # Phase 12: REST API routers
-    from app.api.routes import admin, media, subscriptions, telegram, users
+    from app.api.routes import admin, media, midtrans, subscriptions, telegram, users
 
     application.include_router(users.router)
     application.include_router(telegram.router)
     application.include_router(subscriptions.router)
     application.include_router(media.router)
     application.include_router(admin.router)
+    application.include_router(midtrans.router)
 
     log.info("app_created", env=settings.app_env)
     return application

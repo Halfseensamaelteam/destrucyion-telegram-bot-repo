@@ -41,10 +41,7 @@ class SubscriptionService:
         return await self._repo.get_by_user_id(user_id)
 
     async def check_active(self, user_id: int) -> bool:
-        """Return True if the user has a currently active subscription.
-        
-        This relies on the database-authoritative SubscriptionRepository.is_active.
-        """
+        """Return True if the user has a currently active subscription."""
         return await self._repo.is_active(user_id)
 
     async def grant_subscription(
@@ -53,29 +50,63 @@ class SubscriptionService:
         plan: SubscriptionPlan,
         starts_at: datetime | None = None,
     ) -> Subscription:
-        """Grant a new subscription to a user (admin operation).
-        
-        If the user already has a subscription, it will be renewed/overwritten
-        starting from the specified `starts_at` date.
+        """Grant or extend a subscription for a user.
+
+        If an existing subscription is currently active, a new paid plan
+        extends from the existing expiry date instead of replacing it.
+
+        Expired or cancelled subscriptions restart from the current time.
+        Lifetime subscriptions have no expiry.
         """
         now = datetime.now(timezone.utc)
-        start_date = starts_at or now
-        expires_at = self._calculate_expiration(plan, start_date)
+        requested_start = starts_at or now
 
         existing_sub = await self._repo.get_by_user_id(user_id)
+
         if existing_sub is not None:
-            # Overwrite existing subscription
+            if plan == SubscriptionPlan.LIFETIME:
+                return await self._repo.renew(
+                    existing_sub,
+                    new_expires_at=None,
+                    plan=plan,
+                )
+
+            existing_expires_at = existing_sub.expires_at
+
+            if existing_expires_at is not None and existing_expires_at.tzinfo is None:
+                existing_expires_at = existing_expires_at.replace(
+                    tzinfo=timezone.utc
+                )
+
+            if existing_sub.is_active and existing_expires_at is not None:
+                new_expires_at = self._calculate_expiration(
+                    plan,
+                    existing_expires_at,
+                )
+            else:
+                new_expires_at = self._calculate_expiration(
+                    plan,
+                    requested_start,
+                )
+
+            existing_sub.starts_at = (
+                existing_sub.starts_at
+                if existing_sub.is_active
+                else requested_start
+            )
+
             return await self._repo.renew(
                 existing_sub,
-                new_expires_at=expires_at,
+                new_expires_at=new_expires_at,
                 plan=plan,
             )
 
-        # Create new subscription
+        expires_at = self._calculate_expiration(plan, requested_start)
+
         return await self._repo.create(
             user_id=user_id,
             plan=plan,
-            starts_at=start_date,
+            starts_at=requested_start,
             expires_at=expires_at,
             status=SubscriptionStatus.ACTIVE,
         )
@@ -85,14 +116,14 @@ class SubscriptionService:
         user_id: int,
         plan: SubscriptionPlan | None = None,
     ) -> Subscription:
-        """Renew an existing subscription.
-        
-        If the subscription is still active, time is appended to the current expiration.
-        If it's expired or cancelled, it restarts from now.
-        """
+        """Renew an existing subscription."""
+
         sub = await self._repo.get_by_user_id(user_id)
         if sub is None:
-            raise SubscriptionError("Cannot renew: user has no subscription record. Use grant_subscription first.")
+            raise SubscriptionError(
+                "Cannot renew: user has no subscription record. "
+                "Use grant_subscription first."
+            )
 
         now = datetime.now(timezone.utc)
         current_plan = plan or sub.plan
@@ -107,14 +138,17 @@ class SubscriptionService:
         expires_at = sub.expires_at
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-            
+
         if sub.is_active and expires_at and expires_at > now:
-            # Append time to existing expiration
-            # SQLite stores dates naively, so make sure it's aware
-            new_expires = self._calculate_expiration(current_plan, expires_at)
+            new_expires = self._calculate_expiration(
+                current_plan,
+                expires_at,
+            )
         else:
-            # Restart from now
-            new_expires = self._calculate_expiration(current_plan, now)
+            new_expires = self._calculate_expiration(
+                current_plan,
+                now,
+            )
 
         return await self._repo.renew(
             sub,
@@ -124,8 +158,11 @@ class SubscriptionService:
 
     async def revoke_subscription(self, user_id: int) -> Subscription:
         """Revoke/cancel an active subscription immediately."""
+
         sub = await self._repo.get_by_user_id(user_id)
         if sub is None:
-            raise SubscriptionError("User has no subscription to revoke.")
-        
+            raise SubscriptionError(
+                "User has no subscription to revoke."
+            )
+
         return await self._repo.cancel(sub)

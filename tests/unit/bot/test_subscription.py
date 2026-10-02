@@ -34,7 +34,7 @@ async def test_no_subscription_shows_free_tier_message():
         await raw_subscription_command(update, MagicMock(), session, MagicMock(id=1))
 
     text = update.message.reply_text.call_args.args[0]
-    assert "do not have an active subscription" in text
+    assert "tidak memiliki langganan aktif" in text
 
 
 async def test_lifetime_subscription_does_not_crash_on_none_expiry():
@@ -50,7 +50,7 @@ async def test_lifetime_subscription_does_not_crash_on_none_expiry():
         await raw_subscription_command(update, MagicMock(), session, MagicMock(id=1))
 
     text = update.message.reply_text.call_args.args[0]
-    assert "Never" in text
+    assert "Selamanya" in text
     assert "Lifetime" in text.title() or "lifetime" in text.lower()
 
 
@@ -70,3 +70,4 @@ async def test_weekly_subscription_shows_expiry_date():
 
     text = update.message.reply_text.call_args.args[0]
     assert "2026-12-25" in text
+

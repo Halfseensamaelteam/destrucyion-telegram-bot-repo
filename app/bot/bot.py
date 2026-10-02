@@ -29,6 +29,7 @@ from app.bot.handlers.account import (
     ENTER_API_HASH,
 )
 from app.bot.handlers.subscription import subscription_command
+from app.bot.handlers.subscription_payment import subscription_payment_callback
 from app.bot.handlers.admin import admin_command
 
 
@@ -61,6 +62,12 @@ def create_bot_app() -> Application:
     
     # Subscription
     application.add_handler(CommandHandler("subscription", subscription_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            subscription_payment_callback,
+            pattern="^(subscription_buy_|subscription_add_plan$)",
+        )
+    )
 
     # Admin
     application.add_handler(CommandHandler("admin", admin_command))
@@ -126,3 +133,4 @@ async def delete_webhook(application: Application) -> None:
     """
     await application.bot.delete_webhook()
     print("Webhook deleted")
+
