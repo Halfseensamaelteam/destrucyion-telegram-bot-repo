@@ -10,6 +10,7 @@ from app.db.models.media_record import MediaRecord, MediaRecordStatus, MediaType
 from app.db.models.subscription import Subscription, SubscriptionPlan, SubscriptionStatus
 from app.db.models.telegram_account import TelegramAccount, TelegramAccountStatus
 from app.db.models.user import User
+from app.db.models.payment import Payment, PaymentStatus
 
 __all__ = [
     "Base",

@@ -164,6 +164,34 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Midtrans Payment Gateway
+    # ------------------------------------------------------------------
+    midtrans_client_key: str = Field(
+        default="",
+        description="Midtrans Client Key.",
+    )
+    midtrans_server_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Midtrans Server Key. Never expose this value.",
+    )
+    midtrans_notification_url: str = Field(
+        default="",
+        description="Public URL where Midtrans sends payment notifications.",
+    )
+    subscription_weekly_price: int = Field(
+        default=8000,
+        description="Weekly subscription price in IDR.",
+    )
+    subscription_monthly_price: int = Field(
+        default=30000,
+        description="Monthly subscription price in IDR.",
+    )
+    subscription_lifetime_price: int = Field(
+        default=2000000,
+        description="Lifetime subscription price in IDR.",
+    )
+
+    # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
     @property
