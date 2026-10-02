@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: destrucyion-telegram-bot
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      - key: SERVICE_ROLE
+        value: all
+      - key: APP_ENV
+        value: production
+      - key: DISPLAY_TIMEZONE
+        value: Asia/Jakarta
+      - key: MIDTRANS_IS_PRODUCTION
+        value: "false"
+      - key: SUBSCRIPTION_WEEKLY_PRICE
+        value: "8000"
+      - key: SUBSCRIPTION_MONTHLY_PRICE
+        value: "30000"
+      - key: SUBSCRIPTION_LIFETIME_PRICE
+        value: "2000000"
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: SESSION_ENCRYPTION_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: APP_SECRET_KEY
+        sync: false
+      - key: MIDTRANS_CLIENT_KEY
+        sync: false
+      - key: MIDTRANS_SERVER_KEY
+        sync: false
+      - key: MIDTRANS_NOTIFICATION_URL
+        sync: false
