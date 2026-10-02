@@ -10,9 +10,14 @@ from telegram.ext import ContextTypes
 
 from app.bot.dependencies import with_db_and_user
 from app.bot.payment_qr_utils import render_payment_qr_png
+from app.core.config import get_settings
 from app.db.models.subscription import SubscriptionPlan
 from app.db.models.user import User
 from app.services.payment import PaymentService
+
+
+def _format_idr(amount: int) -> str:
+    return f"IDR {amount:,}".replace(",", ".")
 
 
 @with_db_and_user
@@ -31,24 +36,25 @@ async def subscription_payment_callback(
     await query.answer()
 
     data = query.data or ""
+    settings = get_settings()
 
     if data == "subscription_add_plan":
         keyboard = [
             [
                 InlineKeyboardButton(
-                    "🗓️ Weekly — IDR 8,000",
+                    f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
                     callback_data="subscription_buy_weekly",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "📅 Monthly — IDR 30,000",
+                    f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
                     callback_data="subscription_buy_monthly",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    "👑 Lifetime — IDR 2,000,000",
+                    f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
                     callback_data="subscription_buy_lifetime",
                 )
             ],
@@ -123,7 +129,7 @@ async def subscription_payment_callback(
     caption = (
         "💳 *TAGIHAN PEMBAYARAN*\n\n"
         f"📦 *Plan:* {plan.value.title()}\n"
-        f"💰 *Jumlah:* IDR {payment.amount:,}\n"
+        f"💰 *Jumlah:* {_format_idr(payment.amount)}\n"
         f"🆔 *Order ID:* `{payment.order_id}`\n\n"
         "⏳ *Status:* PENDING\n"
         f"⏰ *Batas Waktu:* {expiry_text}\n\n"
