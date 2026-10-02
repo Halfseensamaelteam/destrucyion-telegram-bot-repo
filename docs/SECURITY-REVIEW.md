@@ -313,3 +313,21 @@ This document provides a comprehensive security review checklist for the destruc
 - Date: 2026-09-14
 - Phase: Phase 17 - Production Hardening
 - Version: 0.1.0
+
+
+## Payment & Subscription Security Checkpoint
+
+The validated payment path requires:
+
+- Server-side Midtrans credentials from application settings.
+- Sandbox configuration with `is_production=False`.
+- QRIS `acquirer=gopay`.
+- SHA-512 webhook signature verification using the Server Key.
+- Constant-time signature comparison with `hmac.compare_digest`.
+- Payment existence and `gross_amount` validation.
+- Settlement-driven subscription activation.
+- Duplicate-settlement protection.
+- Strict separation of payment expiry and subscription expiry.
+- No credentials in source, logs, documentation, screenshots, or commits.
+
+These controls are protected core behavior.

@@ -193,3 +193,12 @@ Suggested commands: `/start /help /status /accounts /connect /disconnect
 /subscription /save`.
 
 Admin commands may include: `/grant /revoke /users /accounts`.
+
+
+## Payment & Subscription Protection
+
+Before payment/subscription work, read `CLAUDE.md`, `docs/ROADMAP.md`, and `docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`.
+
+Protected behavior includes Sandbox `is_production=False`, QRIS `acquirer=gopay`, webhook signature and amount validation, settlement idempotency, Weekly 7-day duration, Monthly 30-day duration, Lifetime without expiration, active finite extension from existing `expires_at`, and separation of payment expiry from subscription expiry.
+
+Do not change protected payment/subscription behavior merely for pricing, UI, plan, or additional-payment-method work.

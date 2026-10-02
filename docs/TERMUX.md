@@ -134,3 +134,19 @@ python -m worker.main
 | `uv sync` compiling for ages | Use `pip install --prefer-binary` as above instead |
 | `pkg install python-pydantic` not found | Normal — install via pip as shown above |
 | Want multiple terminals without a second session | `pkg install tmux` then use `tmux new-session` |
+
+
+## Payment Sandbox Regression
+
+The payment core can be tested without an external payment call:
+
+```bash
+python -m pytest tests/unit/services/test_midtrans.py tests/unit/services/test_payment.py tests/unit/api/test_midtrans.py -q
+```
+
+For a real Sandbox trial, run the application and Telegram bot normally and
+complete a subscription purchase. The public Midtrans notification endpoint
+must be reachable for webhook delivery.
+
+Keep all Midtrans, Telegram, database, Redis, and encryption credentials only
+in the local environment configuration.

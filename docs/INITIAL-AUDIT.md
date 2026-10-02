@@ -297,3 +297,17 @@ Phase 0 confirms:
 3. **Critical trigger model:** timed/self-destructing media → automatic; regular media → explicit owner command. This distinction must be preserved exactly.
 4. The entire application state, session management, user management, and deployment model must be redesigned from scratch for the multi-tenant `destrucyion-telegram-bot`.
 5. No code from the original can be used as-is in production without addressing all limitations in §8.
+
+
+## 14. Later Implementation Checkpoint
+
+The report above remains the historical Phase 0 audit of the original Saveit
+reference. The original application did not contain the current payment and
+subscription architecture.
+
+The rebuilt project now has a validated Midtrans Sandbox payment flow with
+QRIS, persistent payment records, secure webhook validation, settlement-driven
+subscription activation, subscription extension, and Telegram notification.
+
+The payment/subscription protection contract is documented in
+`docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`.

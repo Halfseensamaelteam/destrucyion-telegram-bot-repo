@@ -807,3 +807,128 @@ The implementation should make the capture attempt as early as possible when the
 Possible failure reasons include: Telegram restrictions, protected content, permissions, unavailable media, account restrictions, network failure, API behavior.
 
 The application must report actual success/failure accurately.
+
+
+---
+
+## 30. PAYMENT & SUBSCRIPTION CORE PROTECTION
+
+The validated Midtrans QRIS and subscription flow is a protected contract.
+
+Before changing subscription prices, adding plans, changing subscription UI,
+or adding another payment method, read:
+
+`docs/SUBSCRIPTION-PAYMENT-GATEWAY-CORE.md`
+
+### 30.1 Protected Midtrans behavior
+
+The following behavior must remain unchanged unless the user explicitly
+requests a core change:
+
+- Sandbox uses `is_production=False`.
+- The Server Key remains loaded from application settings/secrets.
+- QRIS charge requests retain:
+  ```python
+  "qris": {
+      "acquirer": "gopay",
+  }
+  ```
+- QRIS `custom_expiry` remains payment expiry configuration.
+- `Payment.expiry_time` represents QRIS/payment expiry only.
+- Order IDs remain unique.
+- Payment amounts are derived from subscription-plan pricing.
+
+### 30.2 Protected webhook behavior
+
+`app/api/routes/midtrans.py` is highly protected.
+
+Do not weaken, remove, or bypass:
+
+- Midtrans signature verification.
+- Server-key based signature validation.
+- `hmac.compare_digest`.
+- `order_id` validation.
+- Payment existence checks.
+- `gross_amount` validation.
+- Transaction-status mapping.
+- Payment status persistence.
+- Settlement handling.
+- Duplicate-settlement protection.
+- Subscription activation after successful settlement.
+- Telegram notification after a newly settled payment.
+
+A webhook must never grant subscription access merely because a client reports
+that payment succeeded.
+
+### 30.3 Protected subscription behavior
+
+Preserve:
+
+- Weekly = 7 days.
+- Monthly = 30 days.
+- Lifetime = no expiration.
+- Active finite subscriptions extend from the existing active `expires_at`.
+- Expired/inactive finite subscriptions start from the new purchase time.
+- Lifetime remains active without an expiration date.
+- Subscription status and expiration remain internally consistent.
+- Repeated settlement notifications must not grant the same payment twice.
+
+Do not confuse:
+
+- `Payment.expiry_time` → QRIS/payment expiration.
+- `Subscription.expires_at` → premium subscription expiration.
+
+### 30.4 Safe feature changes
+
+Requests to:
+
+- change prices,
+- add a subscription plan,
+- change subscription UI/messages,
+- add another payment method,
+
+do not automatically authorize modification of the protected payment,
+webhook, settlement, persistence, or subscription-extension core.
+
+Implement the smallest change around the existing architecture. Do not refactor
+unrelated protected code.
+
+Additional payment methods must preserve the existing QRIS flow and webhook
+security.
+
+### 30.5 Regression requirement
+
+After a payment/subscription change, verify the affected behavior and, where
+relevant:
+
+- QRIS Sandbox transaction creation.
+- Invalid signature rejection.
+- Amount mismatch rejection.
+- Settlement activation.
+- Duplicate settlement idempotency.
+- Active Weekly extension.
+- Active Monthly extension.
+- Lifetime non-expiration.
+- Correct WIB expiry display.
+- Correct Telegram activation notification.
+
+Code compilation alone is not sufficient for payment-core changes.
+
+### 30.6 Secret handling
+
+Never place Midtrans keys, Telegram bot tokens, database credentials, Redis
+credentials, webhook secrets, encryption keys, or other credentials in source,
+documentation, commits, logs, screenshots, or test output.
+
+Use environment variables/application settings.
+
+### 30.7 Production repository safety
+
+The repository's `main` branch is used by the production deployment pipeline.
+Do not use `main` for speculative experiments or temporary downloadable
+artifacts.
+
+Temporary downloadable artifacts must use a temporary branch. Documentation
+or rule updates intended for the production repository may be committed to
+`main` when explicitly requested.
+
