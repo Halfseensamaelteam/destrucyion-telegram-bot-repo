@@ -97,7 +97,9 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
         raise HTTPException(status_code=400, detail="Start the phone login first.")
     from app.services.phone_login_runtime import phone_login_runtime
     try:
-        needs_2fa = await phone_login_runtime.verify_code(token, body.code)
+        await phone_login_runtime.submit_code(token, body.code)
+        item = await phone_login_runtime.get(token)
+        needs_2fa = item.stage == "2fa"
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if needs_2fa:
@@ -106,7 +108,7 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
             telegram_user_id=user.telegram_user_id, stage="2fa"
         )
         return {"stage": "2fa", "message": "Enter your Telegram 2FA password on this page."}
-    await phone_login_runtime.finish(token)
+    await phone_login_runtime.wait_for_result(token)
     return {"stage": "complete", "message": "Telegram account connected."}
 
 
