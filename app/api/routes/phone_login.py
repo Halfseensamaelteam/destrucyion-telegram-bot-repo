@@ -109,6 +109,9 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
         )
         return {"stage": "2fa", "message": "Enter your Telegram 2FA password on this page."}
     await phone_login_runtime.wait_for_result(token)
+    await coordinator.consume(
+        token=token, user_id=user.id, telegram_user_id=user.telegram_user_id
+    )
     return {"stage": "complete", "message": "Telegram account connected."}
 
 
