@@ -50,7 +50,7 @@ class PhoneLoginState:
 
     user_id: int
     telegram_user_id: int
-    account_id: int
+    account_id: int | None
     stage: str = "phone"
     attempts: int = 0
 
@@ -119,7 +119,7 @@ class PhoneLoginCoordinator:
         The plaintext token is returned only to the caller so it can be put
         into the HTTPS login URL. Redis stores only its hash.
         """
-        if user_id <= 0 or telegram_user_id <= 0 or account_id <= 0:
+        if user_id <= 0 or telegram_user_id <= 0 or (account_id is not None and account_id <= 0):
             raise ValueError("user_id, telegram_user_id and account_id must be positive")
 
         token = secrets.token_urlsafe(PHONE_LOGIN_TOKEN_BYTES)
@@ -161,6 +161,37 @@ class PhoneLoginCoordinator:
         if state.user_id != user_id or state.telegram_user_id != telegram_user_id:
             raise PhoneLoginBindingError("Login ticket is not bound to this user.")
         return state
+
+    async def bind_account(
+        self,
+        *,
+        token: str,
+        user_id: int,
+        telegram_user_id: int,
+        account_id: int,
+    ) -> PhoneLoginState:
+        """Bind the ticket to the newly-created Telegram account row."""
+        if account_id <= 0:
+            raise ValueError("account_id must be positive")
+        state = await self.require_user(
+            token=token,
+            user_id=user_id,
+            telegram_user_id=telegram_user_id,
+        )
+        updated = PhoneLoginState(
+            user_id=state.user_id,
+            telegram_user_id=state.telegram_user_id,
+            account_id=account_id,
+            stage=state.stage,
+            attempts=state.attempts,
+        )
+        await self._client().set(
+            self._redis_key(token),
+            self._serialize(updated),
+            ex=self._ttl_seconds,
+            xx=True,
+        )
+        return updated
 
     async def set_stage(
         self,
