@@ -42,7 +42,8 @@ class PhoneLoginRuntimeManager:
         client = TelegramClient(StringSession(), api_id, api_hash)
         item = PhoneLoginRuntime(
             client=client, phone=phone, account_id=account_id,
-            user_id=user_id, created_at=time.monotonic()
+            user_id=user_id, created_at=time.monotonic(),
+            code_future=asyncio.get_running_loop().create_future()
         )
         async with self._lock:
             old = self._items.pop(token, None)
@@ -57,7 +58,8 @@ class PhoneLoginRuntimeManager:
 
         async def code_callback():
             item.stage = "code"
-            item.code_future = loop.create_future()
+            if item.code_future is None or item.code_future.done():
+                item.code_future = loop.create_future()
             return await item.code_future
 
         async def password_callback():
