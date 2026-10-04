@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Public web URL
+    # ------------------------------------------------------------------
+    web_base_url: str = Field(
+        default="http://localhost:8000",
+        description="Public HTTPS base URL used for one-time browser login links.",
+    )
+
+    # ------------------------------------------------------------------
     # Webhook
     # ------------------------------------------------------------------
     webhook_secret: SecretStr = Field(
