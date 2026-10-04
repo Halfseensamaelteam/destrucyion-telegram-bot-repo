@@ -19,7 +19,7 @@ button{cursor:pointer}
 <p id="message">This page is for a short-lived, one-time Telegram login attempt.</p>
 <form id="login-form"><div id="fields"></div><button id="submit">Continue</button></form>
 <script>
-const token=new URLSearchParams(location.search).get("token");
+const token=new URLSearchParams(location.hash.slice(1)).get("token");
 const fields=document.getElementById("fields");
 const message=document.getElementById("message");
 const submit=document.getElementById("submit");
@@ -37,8 +37,10 @@ function render(next){
  else {fields.innerHTML="<p>Connected successfully. You can close this page.</p>";submit.hidden=true;}
 }
 async function post(path,data){
- const r=await fetch(path+"?token="+encodeURIComponent(token),{
-  method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store",
+ const r=await fetch(path,{
+  method:"POST",
+  headers:{"Content-Type":"application/json","X-Phone-Login-Token":token||""},
+  cache:"no-store",
   body:JSON.stringify(data)
  });
  const j=await r.json(); if(!r.ok) throw new Error(j.detail||"Request failed"); return j;
