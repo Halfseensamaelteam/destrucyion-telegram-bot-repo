@@ -1,8 +1,4 @@
-"""In-memory Telethon coordinator for browser-based phone login.
-
-Redis stores only short-lived browser state. The connected Telethon client stays
-in this process for the entire send-code -> OTP -> optional 2FA sequence.
-"""
+"""In-memory Telethon runtime for browser phone login."""
 from __future__ import annotations
 
 import asyncio
@@ -10,7 +6,6 @@ import time
 from dataclasses import dataclass
 
 from telethon import TelegramClient
-from telethon.errors import RPCError, SessionPasswordNeededError
 from telethon.sessions import StringSession
 
 from app.core.crypto import SessionCipher
@@ -18,23 +13,21 @@ from app.db.session import _get_session_factory
 from app.services.account import AccountService, AuthError
 
 PHONE_LOGIN_TIMEOUT_SECONDS = 10 * 60
-MAX_CODE_ATTEMPTS = 5
-MAX_2FA_ATTEMPTS = 3
+MAX_LOGIN_ATTEMPTS = 3
 
 
 @dataclass
 class PhoneLoginRuntime:
     client: TelegramClient
     phone: str
-    phone_code_hash: str
     account_id: int
     user_id: int
-    api_id: int
-    api_hash: str
     created_at: float
-    code_attempts: int = 0
-    twofa_attempts: int = 0
     stage: str = "code"
+    code_future: asyncio.Future[str] | None = None
+    password_future: asyncio.Future[str] | None = None
+    task: asyncio.Task[None] | None = None
+    error: str | None = None
 
 
 class PhoneLoginRuntimeManager:
@@ -42,83 +35,53 @@ class PhoneLoginRuntimeManager:
         self._items: dict[str, PhoneLoginRuntime] = {}
         self._lock = asyncio.Lock()
 
-    async def create(self, token: str, *, user_id: int, account_id: int, api_id: int, api_hash: str, phone: str) -> PhoneLoginRuntime:
-        if not token:
-            raise AuthError("Invalid phone login ticket.")
+    async def create(
+        self, token: str, *, user_id: int, account_id: int,
+        api_id: int, api_hash: str, phone: str
+    ) -> PhoneLoginRuntime:
         client = TelegramClient(StringSession(), api_id, api_hash)
-        try:
-            await client.connect()
-            result = await client.send_code_request(phone)
-        except Exception as exc:
-            await client.disconnect()
-            raise AuthError(f"Could not send Telegram login code: {exc}") from exc
         item = PhoneLoginRuntime(
-            client=client,
-            phone=phone,
-            phone_code_hash=result.phone_code_hash,
-            account_id=account_id,
-            user_id=user_id,
-            api_id=api_id,
-            api_hash=api_hash,
-            created_at=time.monotonic(),
+            client=client, phone=phone, account_id=account_id,
+            user_id=user_id, created_at=time.monotonic()
         )
         async with self._lock:
             old = self._items.pop(token, None)
             if old:
-                await old.client.disconnect()
+                await self._stop(old)
             self._items[token] = item
+        item.task = asyncio.create_task(self._run(token, item))
         return item
 
-    async def get(self, token: str) -> PhoneLoginRuntime:
-        async with self._lock:
-            item = self._items.get(token)
-        if not item or time.monotonic() - item.created_at > PHONE_LOGIN_TIMEOUT_SECONDS:
-            if item:
-                await self.remove(token)
-            raise AuthError("Phone login expired. Please start /connect again.")
-        return item
+    async def _run(self, token: str, item: PhoneLoginRuntime) -> None:
+        loop = asyncio.get_running_loop()
 
-    async def verify_code(self, token: str, code: str) -> tuple[bool, bool]:
-        item = await self.get(token)
-        if item.code_attempts >= MAX_CODE_ATTEMPTS:
-            await self.remove(token)
-            raise AuthError("Too many OTP attempts. Please start again.")
-        item.code_attempts += 1
-        try:
-            await item.client.sign_in(
-                phone=item.phone,
-                code=code,
-                phone_code_hash=item.phone_code_hash,
-            )
-            return True, False
-        except SessionPasswordNeededError:
+        async def code_callback():
+            item.stage = "code"
+            item.code_future = loop.create_future()
+            return await item.code_future
+
+        async def password_callback():
             item.stage = "2fa"
-            return False, True
-        except RPCError as exc:
-            if item.code_attempts >= MAX_CODE_ATTEMPTS:
-                await self.remove(token)
-            raise AuthError(f"Telegram rejected the login code: {exc}") from exc
+            item.password_future = loop.create_future()
+            return await item.password_future
 
-    async def verify_2fa(self, token: str, password: str) -> bool:
-        item = await self.get(token)
-        if item.stage != "2fa":
-            raise AuthError("2FA is not required for this login.")
-        if item.twofa_attempts >= MAX_2FA_ATTEMPTS:
-            await self.remove(token)
-            raise AuthError("Too many 2FA attempts. Please start again.")
-        item.twofa_attempts += 1
         try:
-            await item.client.sign_in(password=password)
-            return True
-        except RPCError as exc:
-            if item.twofa_attempts >= MAX_2FA_ATTEMPTS:
-                await self.remove(token)
-            raise AuthError(f"Telegram rejected the 2FA password: {exc}") from exc
+            await item.client.start(
+                phone=item.phone,
+                code_callback=code_callback,
+                password=password_callback,
+                max_attempts=MAX_LOGIN_ATTEMPTS,
+            )
+            item.stage = "complete"
+            await self._persist(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            item.error = str(exc)
+        finally:
+            await item.client.disconnect()
 
-    async def finish(self, token: str) -> None:
-        item = await self.get(token)
-        if not await item.client.is_user_authorized():
-            raise AuthError("Telegram login is not authorized.")
+    async def _persist(self, item: PhoneLoginRuntime) -> None:
         me = await item.client.get_me()
         cipher = SessionCipher.from_settings()
         session_ciphertext = cipher.encrypt(item.client.session.save())
@@ -127,8 +90,7 @@ class PhoneLoginRuntimeManager:
         if me and me.phone:
             phone = me.phone
             phone_masked = phone[:3] + "*" * max(0, len(phone) - 6) + phone[-3:]
-        session_factory = _get_session_factory()
-        async with session_factory() as session:
+        async with _get_session_factory() as session:
             svc = AccountService(session)
             account = await svc._get_account_for_user(item.account_id, item.user_id)
             await svc._repo.update_session(
@@ -140,12 +102,62 @@ class PhoneLoginRuntimeManager:
                 phone_ciphertext=phone_ciphertext,
             )
             await session.commit()
-        await self.remove(token)
+
+    async def get(self, token: str) -> PhoneLoginRuntime:
+        async with self._lock:
+            item = self._items.get(token)
+        if item is None:
+            raise AuthError("Phone login is missing or expired.")
+        if time.monotonic() - item.created_at > PHONE_LOGIN_TIMEOUT_SECONDS:
+            await self.remove(token)
+            raise AuthError("Phone login expired. Please start /connect again.")
+        if item.error:
+            message = item.error
+            await self.remove(token)
+            raise AuthError(f"Telegram login failed: {message}")
+        return item
+
+    async def submit_code(self, token: str, code: str) -> None:
+        item = await self.get(token)
+        if item.stage != "code" or item.code_future is None:
+            raise AuthError("Telegram is not waiting for a login code.")
+        if item.code_future.done():
+            raise AuthError("This login-code request was already submitted.")
+        item.code_future.set_result(code)
+
+    async def submit_password(self, token: str, value: str) -> None:
+        item = await self.get(token)
+        if item.stage != "2fa" or item.password_future is None:
+            raise AuthError("Telegram is not waiting for 2FA.")
+        if item.password_future.done():
+            raise AuthError("This 2FA request was already submitted.")
+        item.password_future.set_result(value)
+
+    async def wait_for_result(self, token: str) -> str:
+        item = await self.get(token)
+        if item.task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(item.task),
+                    timeout=PHONE_LOGIN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                await self.remove(token)
+                raise AuthError("Phone login expired.")
+        if item.error:
+            raise AuthError(f"Telegram login failed: {item.error}")
+        return item.stage
 
     async def remove(self, token: str) -> None:
         async with self._lock:
             item = self._items.pop(token, None)
         if item:
+            await self._stop(item)
+
+    async def _stop(self, item: PhoneLoginRuntime) -> None:
+        if item.task and not item.task.done():
+            item.task.cancel()
+        if item.client.is_connected():
             await item.client.disconnect()
 
 
