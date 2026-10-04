@@ -35,7 +35,7 @@ async def connect_phone_command(
         account_id=None,
     )
     base = get_settings().web_base_url.rstrip("/")
-    url = f"{base}/api/v1/phone-login/start?token={token}"
+    url = f"{base}/api/v1/phone-login/start#token={token}"
     await update.message.reply_text(
         "📱 Open this secure one-time link in your browser:\n\n"
         f"{url}\n\n"
