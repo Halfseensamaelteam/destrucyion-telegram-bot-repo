@@ -118,8 +118,8 @@ async def verify_2fa(body: TwoFARequest, x_phone_login_token: str = Header(defau
         raise HTTPException(status_code=400, detail="2FA is not required.")
     from app.services.phone_login_runtime import phone_login_runtime
     try:
-        await phone_login_runtime.verify_2fa(token, body.password)
-        await phone_login_runtime.finish(token)
+        await phone_login_runtime.submit_password(token, body.password)
+        await phone_login_runtime.wait_for_result(token)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"stage": "complete", "message": "Telegram account connected."}
