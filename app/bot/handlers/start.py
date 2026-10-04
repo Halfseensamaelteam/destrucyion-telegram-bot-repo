@@ -26,8 +26,14 @@ async def start_command(
         f"Hello {user.first_name}! 👋\n\n"
         "I am your personal Telegram Media Preserver. I securely connect to your Telegram "
         "account and automatically save timed/self-destructing media (and other media) to your Saved Messages.\n\n"
-        "To get started, use the /connect command to link your Telegram account.\n\n"
-        "Type /help to see all available commands."
+        "⚠️ *Ketentuan Penggunaan*\n"
+        "Bot ini hanya boleh digunakan untuk kegiatan yang sah. Dilarang menggunakan bot "
+        "untuk aktivitas ilegal, penipuan, penyalahgunaan layanan, phishing, malware, "
+        "pelanggaran hak cipta, atau kegiatan lain yang melanggar hukum.\n\n"
+        "Dengan menggunakan bot, kamu menyetujui ketentuan penggunaan dan ringkasan privasi "
+        "yang berlaku di *docs/TERMS-OF-USE.md*.\n\n"
+        "Untuk mulai menggunakan layanan, gunakan /connect untuk menghubungkan akun Telegram.\n\n"
+        "Ketik /help untuk melihat semua command yang tersedia."
     )
     if update.message:
         await update.message.reply_text(welcome_text)
