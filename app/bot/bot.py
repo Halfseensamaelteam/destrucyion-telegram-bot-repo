@@ -31,6 +31,7 @@ from app.bot.handlers.account import (
 from app.bot.handlers.subscription import subscription_command
 from app.bot.handlers.subscription_payment import subscription_payment_callback
 from app.bot.handlers.admin import admin_command
+from app.bot.handlers.phone_login import connect_phone_command
 
 
 def create_bot_app() -> Application:
@@ -75,6 +76,7 @@ def create_bot_app() -> Application:
     # Accounts / Disconnect
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("disconnect", disconnect_command))
+    application.add_handler(CommandHandler("connectphone", connect_phone_command))
     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
 
     # 2FA password capture for in-progress QR logins (CLAUDE.md §12.1/§12.2).
