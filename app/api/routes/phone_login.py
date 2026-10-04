@@ -1,7 +1,7 @@
 """Browser API endpoints for the secure Telegram phone-login flow."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -40,16 +40,22 @@ async def _resolve_user(token: str):
 
 
 @router.get("/start", response_class=HTMLResponse)
-async def login_page(token: str) -> HTMLResponse:
-    try:
-        await coordinator.get(token=token)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return HTMLResponse(PHONE_LOGIN_HTML, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+async def login_page() -> HTMLResponse:
+    return HTMLResponse(
+        PHONE_LOGIN_HTML,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Referrer-Policy": "no-referrer",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+        },
+    )
 
 
 @router.post("/start")
-async def start_login(body: StartRequest, token: str):
+async def start_login(body: StartRequest, x_phone_login_token: str = Header(default="")):
+    token = x_phone_login_token
     state, user = await _resolve_user(token)
     if state.account_id is not None:
         raise HTTPException(status_code=400, detail="Login has already started.")
@@ -84,7 +90,8 @@ async def start_login(body: StartRequest, token: str):
 
 
 @router.post("/code")
-async def verify_code(body: CodeRequest, token: str):
+async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(default="")):
+    token = x_phone_login_token
     state, user = await _resolve_user(token)
     if state.account_id is None:
         raise HTTPException(status_code=400, detail="Start the phone login first.")
@@ -104,7 +111,8 @@ async def verify_code(body: CodeRequest, token: str):
 
 
 @router.post("/2fa")
-async def verify_2fa(body: TwoFARequest, token: str):
+async def verify_2fa(body: TwoFARequest, x_phone_login_token: str = Header(default="")):
+    token = x_phone_login_token
     state, user = await _resolve_user(token)
     if state.stage != "2fa":
         raise HTTPException(status_code=400, detail="2FA is not required.")
@@ -118,7 +126,8 @@ async def verify_2fa(body: TwoFARequest, token: str):
 
 
 @router.post("/cancel")
-async def cancel_login(token: str):
+async def cancel_login(x_phone_login_token: str = Header(default="")):
+    token = x_phone_login_token
     try:
         state, _ = await _resolve_user(token)
         from app.services.phone_login_runtime import phone_login_runtime
