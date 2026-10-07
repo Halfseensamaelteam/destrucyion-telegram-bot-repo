@@ -93,6 +93,10 @@ def create_bot_app() -> Application:
     connect_handler = ConversationHandler(
         entry_points=[CommandHandler("connect", connect_start)],
         states={
+            CONNECT_METHOD: [
+                CallbackQueryHandler(connect_phone_command, pattern="^connect_phone$"),
+                CallbackQueryHandler(connect_qr_choice, pattern="^connect_qr$"),
+            ],
             ENTER_API_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_id)
             ],
