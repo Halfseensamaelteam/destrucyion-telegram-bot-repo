@@ -137,18 +137,8 @@ async def connect_start(
             "the linked session was removed from Telegram (check Settings → "
             "Devices in your Telegram app). Let's set up a new connection."
         )
-        # api_id/api_hash are typically unaffected by a revoked session —
-        # reuse what's on file and go straight to QR rather than re-asking.
-        if existing.api_id and existing.api_hash_ciphertext:
-            chat_id = update.effective_chat.id
-            await context.bot.send_message(chat_id, "⏳ Generating your QR code...")
-            asyncio.create_task(
-                _run_qr_login_task(
-                    bot=context.bot, chat_id=chat_id, account_id=existing.id, user_id=user.id
-                )
-            )
-            return ConversationHandler.END
-        # else: fall through to ask for api_id/api_hash again below
+        # The previous session is invalid, so let the user choose how to
+        # reconnect. Do not silently force QR login.
 
     keyboard = [
         [InlineKeyboardButton("📱 Phone Login", callback_data="connect_phone")],
