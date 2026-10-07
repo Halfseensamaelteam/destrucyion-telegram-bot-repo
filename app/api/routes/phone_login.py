@@ -65,18 +65,18 @@ async def start_login(body: StartRequest, x_phone_login_token: str = Header(defa
             account = await svc.create_or_reset_account(
                 user_id=user.id, api_id=body.api_id, api_hash=body.api_hash
             )
-            await session.commit()
-        except AccountAlreadyExistsError as exc:
-            await session.rollback()
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        try:
             from app.services.phone_login_runtime import phone_login_runtime
             await phone_login_runtime.create(
                 token, user_id=user.id, account_id=account.id,
                 api_id=body.api_id, api_hash=body.api_hash, phone=body.phone
             )
+            await session.commit()
+        except AccountAlreadyExistsError as exc:
+            await session.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception:
             await session.rollback()
+            await phone_login_runtime.remove(token)
             raise
     await coordinator.bind_account(
         token=token, user_id=user.id,
