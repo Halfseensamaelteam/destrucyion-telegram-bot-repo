@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -31,6 +31,7 @@ class PhoneLoginRuntime:
     password_future: asyncio.Future[str] | None = None
     task: asyncio.Task[None] | None = None
     error: str | None = None
+    submit_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class PhoneLoginRuntimeManager:
@@ -124,19 +125,21 @@ class PhoneLoginRuntimeManager:
 
     async def submit_code(self, token: str, code: str) -> None:
         item = await self.get(token)
-        if item.stage != "code" or item.code_future is None:
-            raise AuthError("Telegram is not waiting for a login code.")
-        if item.code_future.done():
-            raise AuthError("This login-code request was already submitted.")
-        item.code_future.set_result(code)
+        async with item.submit_lock:
+            if item.stage != "code" or item.code_future is None:
+                raise AuthError("Telegram is not waiting for a login code.")
+            if item.code_future.done():
+                raise AuthError("This login-code request was already submitted.")
+            item.code_future.set_result(code)
 
     async def submit_password(self, token: str, value: str) -> None:
         item = await self.get(token)
-        if item.stage != "2fa" or item.password_future is None:
-            raise AuthError("Telegram is not waiting for 2FA.")
-        if item.password_future.done():
-            raise AuthError("This 2FA request was already submitted.")
-        item.password_future.set_result(value)
+        async with item.submit_lock:
+            if item.stage != "2fa" or item.password_future is None:
+                raise AuthError("Telegram is not waiting for 2FA.")
+            if item.password_future.done():
+                raise AuthError("This 2FA request was already submitted.")
+            item.password_future.set_result(value)
 
     async def wait_for_result(self, token: str) -> str:
         item = await self.get(token)
