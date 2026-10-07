@@ -91,7 +91,7 @@ class PhoneLoginCoordinator:
             return PhoneLoginState(
                 user_id=int(data["user_id"]),
                 telegram_user_id=int(data["telegram_user_id"]),
-                account_id=int(data["account_id"]),
+                account_id=(None if data.get("account_id") is None else int(data["account_id"])),
                 stage=str(data["stage"]),
                 attempts=int(data["attempts"]),
             )
