@@ -20,14 +20,16 @@ async def connect_phone_command(
     user: User,
 ) -> None:
     """Issue a one-time browser link for Telegram phone authentication."""
+    message = update.effective_message
+    if message is None:
+        return
+    if update.callback_query is not None:
+        await update.callback_query.answer()
+
     repo = TelegramAccountRepository(session)
     account = await repo.get_by_user_id(user.id)
     if account is not None and account.status.value != "disconnected":
-        message = update.effective_message
-    if message is None:
-        return ConversationHandler.END
-
-    await message.reply_text(
+        await message.reply_text(
             "You already have a connected account (or a connection is in progress). "
             "Use /disconnect first."
         )
@@ -42,7 +44,7 @@ async def connect_phone_command(
     try:
         settings.validate_phone_login_url()
     except ValueError as exc:
-        await update.message.reply_text(
+        await message.reply_text(
             "Phone login is temporarily unavailable because the web login URL is not configured securely."
         )
         raise RuntimeError("Invalid phone-login web_base_url configuration") from exc
