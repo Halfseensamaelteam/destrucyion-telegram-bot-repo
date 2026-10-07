@@ -4,6 +4,8 @@ app.bot.handlers.start
 Basic bot commands: /start, /help, /status.
 """
 
+from html import escape
+
 from sqlalchemy.ext.asyncio import AsyncSession
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -47,6 +49,7 @@ async def help_command(
     Lists all available commands. Includes admin commands if the user is an admin.
     """
     from app.core.config import get_settings
+
     settings = get_settings()
 
     help_text = (
@@ -85,7 +88,7 @@ async def status_command(
     accounts = await account_repo.list_by_user(user.id)
     subscription = await sub_repo.get_by_user_id(user.id)
 
-    status_text = f"📊 *Your Status Overview*\n\n"
+    status_text = "📊 <b>Your Status Overview</b>\n\n"
 
     # Subscription Section
     if subscription:
@@ -95,13 +98,13 @@ async def status_command(
             else subscription.expires_at.strftime("%Y-%m-%d %H:%M UTC")
         )
         status_text += (
-            f"👑 *Subscription:* {subscription.plan.value.title()}\n"
-            f"📅 *Expires:* {expires_line}\n"
+            f"👑 <b>Subscription:</b> {escape(str(subscription.plan.value.title()))}\n"
+            f"📅 <b>Expires:</b> {escape(expires_line)}\n"
         )
     else:
-        status_text += "👑 *Subscription:* None (Free tier or expired)\n"
+        status_text += "👑 <b>Subscription:</b> None (Free tier or expired)\n"
 
-    status_text += "\n📱 *Connected Accounts:*\n"
+    status_text += "\n📱 <b>Connected Accounts:</b>\n"
 
     # Accounts Section
     if not accounts:
@@ -110,7 +113,9 @@ async def status_command(
         for acc in accounts:
             # We don't have real-time RUNNING vs ERROR here without hitting the worker,
             # but we can show the DB status (ACTIVE/BANNED etc).
-            status_text += f"- {acc.phone_masked} [{acc.status.value.upper()}]\n"
-            
+            phone = escape(str(acc.phone_masked or "Unknown"))
+            account_status = escape(str(acc.status.value.upper()))
+            status_text += f"- {phone} [{account_status}]\n"
+
     if update.message:
-        await update.message.reply_text(status_text, parse_mode="Markdown")
+        await update.message.reply_text(status_text, parse_mode="HTML")

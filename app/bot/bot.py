@@ -25,12 +25,15 @@ from app.bot.handlers.account import (
     disconnect_command,
     disconnect_callback,
     maybe_capture_2fa_password,
+    CONNECT_METHOD,
     ENTER_API_ID,
     ENTER_API_HASH,
+    connect_qr_choice,
 )
 from app.bot.handlers.subscription import subscription_command
 from app.bot.handlers.subscription_payment import subscription_payment_callback
 from app.bot.handlers.admin import admin_command
+from app.bot.handlers.phone_login import connect_phone_command
 
 
 def create_bot_app() -> Application:
@@ -75,6 +78,7 @@ def create_bot_app() -> Application:
     # Accounts / Disconnect
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("disconnect", disconnect_command))
+    application.add_handler(CommandHandler("connectphone", connect_phone_command))
     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
 
     # 2FA password capture for in-progress QR logins (CLAUDE.md §12.1/§12.2).
@@ -91,6 +95,10 @@ def create_bot_app() -> Application:
     connect_handler = ConversationHandler(
         entry_points=[CommandHandler("connect", connect_start)],
         states={
+            CONNECT_METHOD: [
+                CallbackQueryHandler(connect_phone_command, pattern="^connect_phone$"),
+                CallbackQueryHandler(connect_qr_choice, pattern="^connect_qr$"),
+            ],
             ENTER_API_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, connect_api_id)
             ],
@@ -133,4 +141,3 @@ async def delete_webhook(application: Application) -> None:
     """
     await application.bot.delete_webhook()
     print("Webhook deleted")
-
