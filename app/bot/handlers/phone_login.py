@@ -34,7 +34,15 @@ async def connect_phone_command(
         telegram_user_id=user.telegram_user_id,
         account_id=None,
     )
-    base = get_settings().web_base_url.rstrip("/")
+    settings = get_settings()
+    try:
+        settings.validate_phone_login_url()
+    except ValueError as exc:
+        await update.message.reply_text(
+            "Phone login is temporarily unavailable because the web login URL is not configured securely."
+        )
+        raise RuntimeError("Invalid phone-login web_base_url configuration") from exc
+    base = settings.web_base_url.rstrip("/")
     url = f"{base}/api/v1/phone-login/start#token={token}"
     await update.message.reply_text(
         "📱 Open this secure one-time link in your browser:\n\n"
