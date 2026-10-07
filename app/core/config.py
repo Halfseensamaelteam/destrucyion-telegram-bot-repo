@@ -10,7 +10,7 @@ Never hard-code secrets here — use .env.example as the template.
 from functools import lru_cache
 from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator, Field, SecretStr
+from pydantic import BeforeValidator, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -210,15 +210,17 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         return self.app_env == "development"
 
-    def validate_phone_login_url(self) -> None:
-        """Require HTTPS for browser phone-login links outside development."""
+    @model_validator(mode="after")
+    def validate_phone_login_url(self) -> "Settings":
+        """Require an absolute HTTPS URL for browser login outside development."""
         from urllib.parse import urlparse
 
         parsed = urlparse(self.web_base_url)
-        if self.app_env != "development" and parsed.scheme != "https":
-            raise ValueError("web_base_url must use HTTPS outside development")
         if not parsed.netloc:
             raise ValueError("web_base_url must be an absolute URL")
+        if self.app_env != "development" and parsed.scheme != "https":
+            raise ValueError("web_base_url must use HTTPS outside development")
+        return self
 
     @property
     def is_production(self) -> bool:
