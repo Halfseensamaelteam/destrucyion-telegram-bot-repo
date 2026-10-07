@@ -154,7 +154,9 @@ class PhoneLoginRuntimeManager:
                 raise AuthError("Phone login expired.")
         if item.error:
             raise AuthError(item.error)
-        return item.stage
+        result = item.stage
+        await self.remove(token)
+        return result
 
     async def remove(self, token: str) -> None:
         async with self._lock:
