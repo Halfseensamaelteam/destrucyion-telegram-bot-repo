@@ -32,7 +32,8 @@ class TwoFARequest(BaseModel):
 
 async def _resolve_user(token: str):
     state = await coordinator.get(token=token)
-    async with _get_session_factory() as session:
+    factory = _get_session_factory()
+    async with factory() as session:
         user = await UserRepository(session).get_by_id(state.user_id)
     if user is None or user.telegram_user_id != state.telegram_user_id:
         raise HTTPException(status_code=400, detail="Login ticket is invalid.")
