@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import re
 
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.db.session import _get_session_factory
 from app.db.repositories.user_repo import UserRepository
@@ -16,15 +17,40 @@ from app.web.phone_login import PHONE_LOGIN_HTML
 router = APIRouter(prefix="/api/v1/phone-login", tags=["phone-login"])
 coordinator = PhoneLoginCoordinator()
 
+_API_HASH_RE = re.compile(r"^[0-9a-fA-F]{32}$")
+_PHONE_RE = re.compile(r"^\+[1-9]\d{6,14}$")
+_CODE_RE = re.compile(r"^\d{1,32}$")
+
 
 class StartRequest(BaseModel):
     api_id: int = Field(gt=0, le=2_147_483_647)
-    api_hash: str = Field(min_length=20, max_length=64)
-    phone: str = Field(min_length=5, max_length=32)
+    api_hash: str = Field(min_length=32, max_length=32)
+    phone: str = Field(min_length=8, max_length=16)
+
+    @field_validator("api_hash")
+    @classmethod
+    def validate_api_hash(cls, value: str) -> str:
+        if not _API_HASH_RE.fullmatch(value):
+            raise ValueError("API Hash must be a 32-character hexadecimal value.")
+        return value
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, value: str) -> str:
+        if not _PHONE_RE.fullmatch(value):
+            raise ValueError("Phone must use international format, e.g. +628123456789.")
+        return value
 
 
 class CodeRequest(BaseModel):
     code: str = Field(min_length=1, max_length=32)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, value: str) -> str:
+        if not _CODE_RE.fullmatch(value):
+            raise ValueError("Login code must contain digits only.")
+        return value
 
 
 class TwoFARequest(BaseModel):
@@ -55,12 +81,18 @@ async def login_page() -> HTMLResponse:
     )
 
 
+@router.get("/status")
+async def login_status(x_phone_login_token: str = Header(default="")):
+    state, _ = await _resolve_user(x_phone_login_token)
+    return {"stage": state.stage, "active": True}
+
+
 @router.post("/start")
 async def start_login(body: StartRequest, x_phone_login_token: str = Header(default="")):
     token = x_phone_login_token
     state, user = await _resolve_user(token)
-    if state.account_id is not None:
-        raise HTTPException(status_code=400, detail="Login has already started.")
+    if state.account_id is not None or state.stage != "phone":
+        raise HTTPException(status_code=400, detail="Login ticket is invalid or already used.")
     factory = _get_session_factory()
     async with factory() as session:
         svc = AccountService(session)
@@ -105,22 +137,15 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # Telethon may need a moment to reach password_callback() after the
-    # code future is released. Never wait for the entire login task here.
     for _ in range(20):
         if item.error:
             raise HTTPException(status_code=400, detail=item.error)
         if item.stage == "2fa":
             await coordinator.set_stage(
-                token=token,
-                user_id=user.id,
-                telegram_user_id=user.telegram_user_id,
-                stage="2fa",
+                token=token, user_id=user.id,
+                telegram_user_id=user.telegram_user_id, stage="2fa"
             )
-            return {
-                "stage": "2fa",
-                "message": "Enter your Telegram 2FA password on this page.",
-            }
+            return {"stage": "2fa", "message": "Enter your Telegram 2FA password on this page."}
         if item.stage == "complete":
             break
         if item.task is not None and item.task.done():
@@ -131,15 +156,10 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
         raise HTTPException(status_code=400, detail=item.error)
     if item.stage == "2fa":
         await coordinator.set_stage(
-            token=token,
-            user_id=user.id,
-            telegram_user_id=user.telegram_user_id,
-            stage="2fa",
+            token=token, user_id=user.id,
+            telegram_user_id=user.telegram_user_id, stage="2fa"
         )
-        return {
-            "stage": "2fa",
-            "message": "Enter your Telegram 2FA password on this page.",
-        }
+        return {"stage": "2fa", "message": "Enter your Telegram 2FA password on this page."}
 
     try:
         await phone_login_runtime.wait_for_result(token)
@@ -165,9 +185,7 @@ async def verify_2fa(body: TwoFARequest, x_phone_login_token: str = Header(defau
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     await coordinator.consume(
-        token=token,
-        user_id=user.id,
-        telegram_user_id=user.telegram_user_id,
+        token=token, user_id=user.id, telegram_user_id=user.telegram_user_id
     )
     return {"stage": "complete", "message": "Telegram account connected."}
 
