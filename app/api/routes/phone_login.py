@@ -60,7 +60,8 @@ async def start_login(body: StartRequest, x_phone_login_token: str = Header(defa
     state, user = await _resolve_user(token)
     if state.account_id is not None:
         raise HTTPException(status_code=400, detail="Login has already started.")
-    async with _get_session_factory() as session:
+    factory = _get_session_factory()
+    async with factory() as session:
         svc = AccountService(session)
         try:
             account = await svc.create_or_reset_account(
