@@ -3,10 +3,9 @@ app.bot.handlers.account
 ~~~~~~~~~~~~~~~~~~~~~~~~
 Account management commands: /accounts, /connect, /disconnect.
 
-Authentication uses QR login ONLY (CLAUDE.md §12.1) — there is no
-phone-number/code step. /connect collects this account's OWN api_id/api_hash
-(CLAUDE.md §12.2), then a QR code is shown for the user to scan with their
-own Telegram client.
+Authentication supports both QR login and secure browser phone login. /connect
+lets the user choose the method. QR login keeps the existing flow; phone login
+opens the short-lived HTTPS browser flow from app.bot.handlers.phone_login.
 
 IMPORTANT — these are ordinary customer-facing commands, NOT admin-only.
 Any authenticated application user may connect their own single Telegram
@@ -52,7 +51,7 @@ from app.core.logging import get_logger
 from app.db.models.user import User
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.db.session import _get_session_factory
-from app.services.account import (
+from app.bot.handlers.phone_login import connect_phone_command\nfrom app.services.account import (
     AccountAlreadyExistsError,
     AccountService,
     AuthError,
@@ -149,16 +148,51 @@ async def connect_start(
             return ConversationHandler.END
         # else: fall through to ask for api_id/api_hash again below
 
+    keyboard = [
+        [InlineKeyboardButton("📱 Phone Login", callback_data="connect_phone")],
+        [InlineKeyboardButton("🔳 QR Login", callback_data="connect_qr")],
+    ]
     await update.message.reply_text(
+        "🔐 Choose how you want to connect your Telegram account:\n\n"
+        "📱 *Phone Login* — sign in with your phone number and Telegram code "
+        "in the secure HTTPS browser page.\n"
+        "🔳 *QR Login* — scan a Telegram QR code from your Telegram app.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    context.user_data["user_id"] = user.id
+    return CONNECT_METHOD
+
+
+
+
+@with_db_and_user
+async def connect_qr_choice(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession, user: User
+) -> int:
+    """Start the existing QR login flow after the user chooses QR."""
+    query = update.callback_query
+    await query.answer()
+
+    repo = TelegramAccountRepository(session)
+    existing = await repo.get_by_user_id(user.id)
+    if existing is not None and existing.status.value != "disconnected":
+        await query.edit_message_text(
+            "You already have a connected account (or a connection is in progress). "
+            "Use /disconnect first."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    await query.edit_message_text(
         "Let's connect your Telegram account via QR login.\n\n"
         "First, you'll need YOUR OWN api_id and api_hash from "
         "https://my.telegram.org (API development tools). Every account "
-        "brings its own credentials — same as the original Saveit script.\n\n"
+        "brings its own credentials.\n\n"
         "Please send your *api_id* (numbers only).\n\n"
         "Send /cancel to stop at any time.",
         parse_mode="Markdown",
     )
-    context.user_data["user_id"] = user.id
     return ENTER_API_ID
 
 
