@@ -127,6 +127,12 @@ async def verify_2fa(body: TwoFARequest, x_phone_login_token: str = Header(defau
         await phone_login_runtime.wait_for_result(token)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await coordinator.consume(
+        token=token,
+        user_id=user.id,
+        telegram_user_id=user.telegram_user_id,
+    )
     return {"stage": "complete", "message": "Telegram account connected."}
 
 
