@@ -83,7 +83,13 @@ async def login_page() -> HTMLResponse:
 
 @router.get("/status")
 async def login_status(x_phone_login_token: str = Header(default="")):
-    state, _ = await _resolve_user(x_phone_login_token)
+    try:
+        state, _ = await _resolve_user(x_phone_login_token)
+    except Exception as exc:
+        from app.services.phone_login import PhoneLoginNotFoundError
+        if isinstance(exc, PhoneLoginNotFoundError):
+            raise HTTPException(status_code=401, detail="Login ticket is invalid or expired.") from exc
+        raise
     return {"stage": state.stage, "active": True}
 
 
