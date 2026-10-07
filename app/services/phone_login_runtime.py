@@ -97,7 +97,8 @@ class PhoneLoginRuntimeManager:
         if me and me.phone:
             phone = me.phone
             phone_masked = phone[:3] + "*" * max(0, len(phone) - 6) + phone[-3:]
-        async with _get_session_factory() as session:
+        factory = _get_session_factory()
+        async with factory() as session:
             svc = AccountService(session)
             account = await svc._get_account_for_user(item.account_id, item.user_id)
             await svc._repo.update_session(
