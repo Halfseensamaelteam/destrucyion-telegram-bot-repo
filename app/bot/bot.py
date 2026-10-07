@@ -25,8 +25,10 @@ from app.bot.handlers.account import (
     disconnect_command,
     disconnect_callback,
     maybe_capture_2fa_password,
+    CONNECT_METHOD,
     ENTER_API_ID,
     ENTER_API_HASH,
+    connect_qr_choice,
 )
 from app.bot.handlers.subscription import subscription_command
 from app.bot.handlers.subscription_payment import subscription_payment_callback
