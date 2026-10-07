@@ -51,7 +51,8 @@ from app.core.logging import get_logger
 from app.db.models.user import User
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.db.session import _get_session_factory
-from app.bot.handlers.phone_login import connect_phone_command\nfrom app.services.account import (
+from app.bot.handlers.phone_login import connect_phone_command
+from app.services.account import (
     AccountAlreadyExistsError,
     AccountService,
     AuthError,
