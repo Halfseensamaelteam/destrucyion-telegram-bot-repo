@@ -210,6 +210,16 @@ class Settings(BaseSettings):
     def is_development(self) -> bool:
         return self.app_env == "development"
 
+    def validate_phone_login_url(self) -> None:
+        """Require HTTPS for browser phone-login links outside development."""
+        from urllib.parse import urlparse
+
+        parsed = urlparse(self.web_base_url)
+        if self.app_env != "development" and parsed.scheme != "https":
+            raise ValueError("web_base_url must use HTTPS outside development")
+        if not parsed.netloc:
+            raise ValueError("web_base_url must be an absolute URL")
+
     @property
     def is_production(self) -> bool:
         return self.app_env == "production"
