@@ -23,7 +23,11 @@ async def connect_phone_command(
     repo = TelegramAccountRepository(session)
     account = await repo.get_by_user_id(user.id)
     if account is not None and account.status.value != "disconnected":
-        await update.message.reply_text(
+        message = update.effective_message
+    if message is None:
+        return ConversationHandler.END
+
+    await message.reply_text(
             "You already have a connected account (or a connection is in progress). "
             "Use /disconnect first."
         )
