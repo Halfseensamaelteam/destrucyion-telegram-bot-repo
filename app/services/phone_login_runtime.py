@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 
@@ -14,6 +15,8 @@ from app.services.account import AccountService, AuthError
 
 PHONE_LOGIN_TIMEOUT_SECONDS = 10 * 60
 MAX_LOGIN_ATTEMPTS = 3
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,8 +81,9 @@ class PhoneLoginRuntimeManager:
             await self._persist(item)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            item.error = str(exc)
+        except Exception:
+            logger.exception("Phone login runtime failed")
+            item.error = "Telegram login could not be completed. Please try again."
         finally:
             await item.client.disconnect()
 
@@ -114,9 +118,8 @@ class PhoneLoginRuntimeManager:
             await self.remove(token)
             raise AuthError("Phone login expired. Please start /connect again.")
         if item.error:
-            message = item.error
             await self.remove(token)
-            raise AuthError(f"Telegram login failed: {message}")
+            raise AuthError(item.error)
         return item
 
     async def submit_code(self, token: str, code: str) -> None:
@@ -147,7 +150,7 @@ class PhoneLoginRuntimeManager:
                 await self.remove(token)
                 raise AuthError("Phone login expired.")
         if item.error:
-            raise AuthError(f"Telegram login failed: {item.error}")
+            raise AuthError(item.error)
         return item.stage
 
     async def remove(self, token: str) -> None:
