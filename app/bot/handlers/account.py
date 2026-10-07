@@ -61,8 +61,9 @@ from app.services.account import (
 
 log = get_logger(__name__)
 
-ENTER_API_ID = 1
-ENTER_API_HASH = 2
+CONNECT_METHOD = 1
+ENTER_API_ID = 2
+ENTER_API_HASH = 3
 
 # chat_id -> asyncio.Future[str], resolved by maybe_capture_2fa_password()
 # when the user replies with their 2FA password during an in-progress QR
