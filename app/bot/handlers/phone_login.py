@@ -50,7 +50,7 @@ async def connect_phone_command(
         raise RuntimeError("Invalid phone-login web_base_url configuration") from exc
     base = settings.web_base_url.rstrip("/")
     url = f"{base}/api/v1/phone-login/start#token={token}"
-    await update.message.reply_text(
+    await message.reply_text(
         "📱 Open this secure one-time link in your browser:\n\n"
         f"{url}\n\n"
         "It expires in 10 minutes and can only be used once. "
