@@ -1,14 +1,15 @@
 """Browser API endpoints for the secure Telegram phone-login flow."""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from app.core.config import get_settings
 from app.db.session import _get_session_factory
 from app.db.repositories.user_repo import UserRepository
-from app.services.account import AccountAlreadyExistsError, AccountService, AuthError
+from app.services.account import AccountAlreadyExistsError, AccountService
 from app.services.phone_login import PhoneLoginCoordinator
 from app.web.phone_login import PHONE_LOGIN_HTML
 
@@ -101,16 +102,49 @@ async def verify_code(body: CodeRequest, x_phone_login_token: str = Header(defau
     try:
         await phone_login_runtime.submit_code(token, body.code)
         item = await phone_login_runtime.get(token)
-        needs_2fa = item.stage == "2fa"
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if needs_2fa:
+
+    # Telethon may need a moment to reach password_callback() after the
+    # code future is released. Never wait for the entire login task here.
+    for _ in range(20):
+        if item.error:
+            raise HTTPException(status_code=400, detail=item.error)
+        if item.stage == "2fa":
+            await coordinator.set_stage(
+                token=token,
+                user_id=user.id,
+                telegram_user_id=user.telegram_user_id,
+                stage="2fa",
+            )
+            return {
+                "stage": "2fa",
+                "message": "Enter your Telegram 2FA password on this page.",
+            }
+        if item.stage == "complete":
+            break
+        if item.task is not None and item.task.done():
+            break
+        await asyncio.sleep(0.05)
+
+    if item.error:
+        raise HTTPException(status_code=400, detail=item.error)
+    if item.stage == "2fa":
         await coordinator.set_stage(
-            token=token, user_id=user.id,
-            telegram_user_id=user.telegram_user_id, stage="2fa"
+            token=token,
+            user_id=user.id,
+            telegram_user_id=user.telegram_user_id,
+            stage="2fa",
         )
-        return {"stage": "2fa", "message": "Enter your Telegram 2FA password on this page."}
-    await phone_login_runtime.wait_for_result(token)
+        return {
+            "stage": "2fa",
+            "message": "Enter your Telegram 2FA password on this page.",
+        }
+
+    try:
+        await phone_login_runtime.wait_for_result(token)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await coordinator.consume(
         token=token, user_id=user.id, telegram_user_id=user.telegram_user_id
     )
