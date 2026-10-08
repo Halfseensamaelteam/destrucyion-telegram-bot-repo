@@ -117,6 +117,11 @@ class TelegramAccountRepository:
         await self._session.refresh(account)
         return account
 
+    async def delete(self, account: TelegramAccount) -> None:
+        """Delete one Telegram account row."""
+        await self._session.delete(account)
+        await self._session.flush()
+
     async def update_session(
         self,
         account: TelegramAccount,
