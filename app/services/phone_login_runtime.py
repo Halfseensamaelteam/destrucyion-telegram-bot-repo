@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 
 from telethon import TelegramClient
+from telethon.errors import PasswordHashInvalidError
 from telethon.sessions import StringSession
 
 from app.core.crypto import SessionCipher
@@ -82,6 +83,9 @@ class PhoneLoginRuntimeManager:
             await self._persist(item)
         except asyncio.CancelledError:
             raise
+        except PasswordHashInvalidError:
+            logger.warning("Phone login rejected an incorrect 2FA password")
+            item.error = "Incorrect Telegram 2FA password. Please start a new login and try again."
         except Exception:
             logger.exception("Phone login runtime failed")
             item.error = "Telegram login could not be completed. Please try again."

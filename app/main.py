@@ -146,7 +146,7 @@ def create_app() -> FastAPI:
             status_code=200,
             content={
                 "status": "ok",
-                "service": "destrucyion-telegram-bot",
+                "service": "ViserBot",
                 "version": "0.1.0",
             },
         )
@@ -178,7 +178,7 @@ def create_app() -> FastAPI:
             status_code=200 if status == "ok" else 503,
             content={
                 "status": status,
-                "service": "destrucyion-telegram-bot",
+                "service": "ViserBot",
                 "version": "0.1.0",
                 "environment": settings.app_env,
                 "checks": {

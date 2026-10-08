@@ -138,7 +138,7 @@ document.getElementById("login-form").addEventListener("submit",async e=>{
   render(j.stage);
  }catch(err){
   message.textContent=err instanceof Error?err.message:"Request failed. Please try again.";
-  if(/invalid|expired|already used|no longer active/i.test(message.textContent))lockPage(message.textContent);
+  if(/invalid|expired|already used|no longer active|request a new login/i.test(message.textContent))lockPage(message.textContent);
   else submit.disabled=false;
  }
 });

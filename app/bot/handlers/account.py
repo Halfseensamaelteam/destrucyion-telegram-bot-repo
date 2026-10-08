@@ -362,7 +362,7 @@ async def disconnect_command(
         return
 
     keyboard = [
-        [InlineKeyboardButton("Yes, disconnect", callback_data=f"disconnect_{account.id}")],
+        [InlineKeyboardButton("Yes, disconnect", callback_data=f"disconnect_confirm_{account.id}")],
         [InlineKeyboardButton("Cancel", callback_data="disconnect_cancel")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -385,18 +385,62 @@ async def disconnect_callback(
         await query.edit_message_text("Disconnection cancelled.")
         return
 
-    if data.startswith("disconnect_"):
+    if data.startswith("disconnect_confirm_"):
         try:
-            account_id = int(data.split("_")[1])
+            account_id = int(data.removeprefix("disconnect_confirm_"))
+        except ValueError:
+            return
+
+        repo = TelegramAccountRepository(session)
+        account = await repo.get_by_id_and_user(account_id, user.id)
+        if account is None:
+            await query.edit_message_text("❌ Account not found.")
+            return
+
+        keyboard = [
+            [InlineKeyboardButton("🗑️ Disconnect & Delete Session", callback_data=f"disconnect_delete_{account_id}")],
+            [InlineKeyboardButton("💾 Disconnect & Keep Session", callback_data=f"disconnect_keep_{account_id}")],
+            [InlineKeyboardButton("Cancel", callback_data="disconnect_cancel")],
+        ]
+        await query.edit_message_text(
+            "🔌 How do you want to disconnect?\n\n"
+            "🗑️ *Delete Session* — removes the Telegram account data from "
+            "the database. Your application user remains unchanged. The next "
+            "connection will require Phone Login or QR Login again.\n\n"
+            "💾 *Keep Session* — disconnects this account but preserves the "
+            "encrypted Telegram session. If it is still valid, /connect can "
+            "reconnect without another login.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("disconnect_delete_") or data.startswith("disconnect_keep_"):
+        prefix = "disconnect_delete_" if data.startswith("disconnect_delete_") else "disconnect_keep_"
+        try:
+            account_id = int(data.removeprefix(prefix))
         except ValueError:
             return
 
         svc = AccountService(session)
         try:
-            await svc.disconnect_account(account_id=account_id, user_id=user.id)
-            await session.commit()
+            if data.startswith("disconnect_delete_"):
+                await svc.delete_account(account_id=account_id, user_id=user.id)
+                await session.commit()
+                await query.edit_message_text(
+                    "🗑️ Telegram account data and stored session were deleted. "
+                    "Your application account was kept. Use /connect to connect again."
+                )
+            else:
+                await svc.disconnect_account(account_id=account_id, user_id=user.id)
+                await session.commit()
+                await query.edit_message_text(
+                    "💾 Account disconnected. Your encrypted session was kept. "
+                    "Use /connect to reconnect; if Telegram has revoked the "
+                    "session, you will be offered Phone Login or QR Login."
+                )
+        except Exception:
+            await session.rollback()
             await query.edit_message_text(
-                "✅ Account successfully disconnected. You may /connect a new one."
+                "❌ Could not update the Telegram account. Please try again."
             )
-        except Exception as e:
-            await query.edit_message_text(f"❌ Error disconnecting account: {e}")
