@@ -358,6 +358,11 @@ class AccountService:
         cipher = SessionCipher.from_settings()
         return account.api_id, cipher.decrypt(account.api_hash_ciphertext)
 
+    async def delete_account(self, account_id: int, user_id: int) -> None:
+        """Permanently remove this user-owned Telegram account row."""
+        account = await self._get_account_for_user(account_id, user_id)
+        await self._repo.delete(account)
+
     async def disconnect_account(self, account_id: int, user_id: int) -> TelegramAccount:
         """Mark an account as disconnected. Session ciphertext is preserved
         (in case of accidental disconnect) but will be cleared on the next
