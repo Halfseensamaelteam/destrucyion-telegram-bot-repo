@@ -11,6 +11,7 @@ from app.db.models.subscription import Subscription, SubscriptionPlan, Subscript
 from app.db.models.telegram_account import TelegramAccount, TelegramAccountStatus
 from app.db.models.user import User
 from app.db.models.payment import Payment, PaymentStatus
+from app.db.models.nowpayments_payment import NOWPaymentsPayment
 
 __all__ = [
     "Base",
@@ -25,4 +26,5 @@ __all__ = [
     "MediaType",
     "AuditLog",
     "AuditAction",
+    "NOWPaymentsPayment",
 ]
