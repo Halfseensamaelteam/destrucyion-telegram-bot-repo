@@ -91,10 +91,11 @@ class NOWPaymentsService:
         price_usd: Decimal,
         order_id: str,
         description: str,
+        pay_currency: str,
         success_url: str | None = None,
         cancel_url: str | None = None,
     ) -> dict[str, Any]:
-        """Create a hosted invoice and return the provider response.
+        """Create a hosted invoice for one explicitly selected asset/network.
 
         NOWPayments' invoice API documents price_amount in a supported fiat
         price currency. For the agreed USDT-denominated menu, this uses the
@@ -108,9 +109,14 @@ class NOWPaymentsService:
                 "NOWPayments IPN callback must be a public HTTPS URL."
             )
 
+        normalized_currency = pay_currency.strip().lower()
+        if normalized_currency not in SUPPORTED_PAYMENT_CURRENCIES:
+            raise ValueError("Unsupported NOWPayments payment currency.")
+
         payload: dict[str, Any] = {
             "price_amount": float(price_usd),
             "price_currency": "usd",
+            "pay_currency": normalized_currency,
             "order_id": order_id,
             "order_description": description[:255],
             "ipn_callback_url": self._ipn_callback_url,
