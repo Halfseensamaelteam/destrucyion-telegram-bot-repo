@@ -60,7 +60,6 @@ class NOWPaymentsSubscriptionService:
             order_id=order_id,
             plan=plan.value,
             price_amount=price_usd,
-            price_currency=str(provider_payment.get("price_currency", "usd")),
             pay_currency=str(provider_payment["pay_currency"]).strip().lower(),
             provider_payment_id=str(provider_payment["payment_id"]),
             pay_address=str(provider_payment["pay_address"]),
