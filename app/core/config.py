@@ -194,7 +194,7 @@ class Settings(BaseSettings):
     # NOWPayments
     # ------------------------------------------------------------------
     nowpayments_environment: Literal["sandbox", "production"] = Field(
-        default="production",
+        default="sandbox",
         description="NOWPayments API environment. Sandbox and production credentials are kept separate.",
     )
     nowpayments_sandbox_api_key: SecretStr = Field(
@@ -237,6 +237,10 @@ class Settings(BaseSettings):
     subscription_monthly_price: int = Field(
         default=30000,
         description="Monthly subscription price in IDR.",
+    )
+    subscription_quarterly_price: int = Field(
+        default=90000,
+        description="Three-month subscription price in IDR.",
     )
     subscription_lifetime_price: int = Field(
         default=2000000,
