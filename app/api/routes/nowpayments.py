@@ -67,7 +67,12 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
         if payment is None:
             raise HTTPException(status_code=404, detail="NOWPayments order not found.")
 
-        if payment.provider_payment_id != provider_payment_id:
+        # Hosted invoice creation returns an invoice ID, while the IPN may
+        # arrive with the underlying payment ID. Bind that ID on the first
+        # correctly signed event for this unique order; reject later changes.
+        if payment.provider_payment_id is None:
+            payment.provider_payment_id = provider_payment_id
+        elif payment.provider_payment_id != provider_payment_id:
             raise HTTPException(status_code=400, detail="Payment ID does not match this order.")
         if notified_price != Decimal(payment.price_amount):
             raise HTTPException(status_code=400, detail="Payment price does not match this order.")
