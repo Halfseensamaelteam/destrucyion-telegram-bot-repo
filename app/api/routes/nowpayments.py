@@ -67,19 +67,18 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
         if payment is None:
             raise HTTPException(status_code=404, detail="NOWPayments order not found.")
 
-        # Hosted invoice creation returns an invoice ID, while the IPN may
-        # arrive with the underlying payment ID. Bind that ID on the first
-        # correctly signed event for this unique order; reject later changes.
-        if payment.provider_payment_id is None:
-            payment.provider_payment_id = provider_payment_id
-        elif payment.provider_payment_id != provider_payment_id:
-            raise HTTPException(status_code=400, detail="Payment ID does not match this order.")
+        # Hosted checkout lets the customer choose an asset, so the invoice
+        # record initially has no payment ID or pay currency. Signed IPN events
+        # identify the concrete payment. Permit a different attempt before
+        # activation (e.g. an expired checkout attempt), but never after grant.
+        if payment.activated_at is not None and payment.provider_payment_id != provider_payment_id:
+            raise HTTPException(status_code=400, detail="Payment ID does not match the activated order.")
         if notified_price != Decimal(payment.price_amount):
             raise HTTPException(status_code=400, detail="Payment price does not match this order.")
         if price_currency != payment.price_currency.lower():
             raise HTTPException(status_code=400, detail="Price currency does not match this order.")
-        if pay_currency != payment.pay_currency.lower():
-            raise HTTPException(status_code=400, detail="Payment currency does not match this order.")
+        if not pay_currency:
+            raise HTTPException(status_code=400, detail="Missing payment currency.")
 
         if payload.get("pay_amount") is not None and payment.pay_amount is not None:
             try:
@@ -91,6 +90,8 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
 
         already_activated = payment.activated_at is not None
         if not already_activated:
+            payment.provider_payment_id = provider_payment_id
+            payment.pay_currency = pay_currency
             payment.payment_status = status
 
         if status == "finished" and not already_activated:
