@@ -96,66 +96,40 @@ async def subscription_payment_callback(
     }
     selected_crypto_plan = nowpayments_plans.get(data)
     if selected_crypto_plan is not None:
-        currency_options = [("USDC — Base", "usdcbase"), ("ETH — Base", "ethbase"), ("TRX — TRON", "trx")]
-        keyboard = [
-            [InlineKeyboardButton(label, callback_data="nowpayments_pay_" + selected_crypto_plan.value + "_" + currency)]
-            for label, currency in currency_options
-        ]
-        keyboard.append([InlineKeyboardButton("⬅️ Kembali", callback_data="nowpayments_menu")])
-        await query.edit_message_text(
-            "💠 *Paket " + selected_crypto_plan.value.title() + "*\n\nPilih aset dan jaringan pembayaran:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    if data.startswith("nowpayments_pay_"):
-        parts = data.split("_")
-        if len(parts) != 4:
-            await query.edit_message_text("⚠️ Pilihan pembayaran tidak valid.")
-            return
-        _, _, plan_name, pay_currency = parts
-        try:
-            selected_plan = SubscriptionPlan(plan_name)
-        except ValueError:
-            await query.edit_message_text("⚠️ Paket tidak valid. Silakan mulai dari /subscription.")
-            return
-        await query.edit_message_text("⏳ Membuat invoice crypto...")
+        await query.edit_message_text("⏳ Membuat invoice checkout NOWPayments...")
         try:
             from app.services.nowpayments_subscription import NOWPaymentsSubscriptionService
             crypto_service = NOWPaymentsSubscriptionService(session)
-            payment, invoice_url = await crypto_service.create_invoice(
-                user_id=user.id, plan=selected_plan, pay_currency=pay_currency,
+            payment, checkout_url = await crypto_service.create_invoice(
+                user_id=user.id,
+                plan=selected_crypto_plan,
             )
             await session.commit()
         except Exception:
             await session.rollback()
             await query.edit_message_text(
-                "❌ Invoice belum dapat dibuat. Periksa konfigurasi NOWPayments dan kode mata uang, lalu coba lagi."
-            )
-            return
-        if not invoice_url or not invoice_url.startswith("https://"):
-            await query.edit_message_text(
-                "❌ NOWPayments tidak mengembalikan link checkout HTTPS yang valid."
+                "❌ Invoice belum dapat dibuat. Periksa konfigurasi NOWPayments dan coba lagi."
             )
             return
 
-        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=invoice_url)]]
+        if not checkout_url.startswith("https://"):
+            await query.edit_message_text("❌ NOWPayments tidak mengembalikan link checkout HTTPS yang valid.")
+            return
+
+        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=checkout_url)]]
         await query.edit_message_text(
             "💠 *INVOICE PEMBAYARAN CRYPTO*\n\n"
-            + "📦 *Paket:* " + selected_plan.value.title() + "\n"
-            + "💵 *Harga:* " + str(payment.price_amount) + " USD (acuan harga paket USDT)\n"
-            + "🪙 *Aset pilihan:* " + pay_currency.upper() + "\n"
+            + "📦 *Paket:* " + selected_crypto_plan.value.title() + "\n"
+            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD (mendekati harga USDT)\n"
             + "🆔 *Order ID:* `" + payment.order_id + "`\n"
             + "⏳ *Status:* Menunggu pembayaran\n\n"
-            + "Tekan tombol di bawah untuk membuka checkout resmi NOWPayments. Periksa aset, jaringan, dan jumlah sebelum membayar. "
+            + "Tekan tombol di bawah untuk membuka checkout resmi NOWPayments. Pilih aset dan jaringan yang tersedia di halaman checkout. "
             + "Subscription hanya aktif setelah pembayaran diverifikasi oleh server.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
             disable_web_page_preview=True,
         )
         return
-
     plans = {
         "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
         "subscription_buy_monthly": SubscriptionPlan.MONTHLY,
