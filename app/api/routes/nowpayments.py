@@ -54,8 +54,14 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
         notified_price = Decimal(str(payload.get("price_amount")))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="Invalid price_amount.") from exc
+    if not notified_price.is_finite() or notified_price <= 0:
+        raise HTTPException(status_code=400, detail="Invalid price_amount.")
+
     price_currency = str(payload.get("price_currency") or "").lower()
     pay_currency = str(payload.get("pay_currency") or "").lower()
+    # Invoice IPNs may include invoice_id. If present, bind the signed event
+    # to the exact hosted invoice created for this order as well as order_id.
+    notified_invoice_id = str(payload.get("invoice_id") or "").strip()
 
     factory = _get_session_factory()
     notify_user_id: int | None = None
@@ -73,6 +79,8 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
         # activation (e.g. an expired checkout attempt), but never after grant.
         if payment.activated_at is not None and payment.provider_payment_id != provider_payment_id:
             raise HTTPException(status_code=400, detail="Payment ID does not match the activated order.")
+        if notified_invoice_id and notified_invoice_id != str(payment.invoice_id or ""):
+            raise HTTPException(status_code=400, detail="Invoice ID does not match this order.")
         if notified_price != Decimal(payment.price_amount):
             raise HTTPException(status_code=400, detail="Payment price does not match this order.")
         if price_currency != payment.price_currency.lower():
@@ -85,6 +93,8 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
                 notified_pay_amount = Decimal(str(payload["pay_amount"]))
             except (InvalidOperation, TypeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail="Invalid pay_amount.") from exc
+            if not notified_pay_amount.is_finite() or notified_pay_amount <= 0:
+                raise HTTPException(status_code=400, detail="Invalid pay_amount.")
             if notified_pay_amount != Decimal(payment.pay_amount):
                 raise HTTPException(status_code=400, detail="Crypto amount does not match this order.")
 
