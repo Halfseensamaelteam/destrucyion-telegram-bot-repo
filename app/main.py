@@ -274,6 +274,7 @@ def create_app() -> FastAPI:
         admin,
         media,
         midtrans,
+        nowpayments,
         phone_login,
         subscriptions,
         telegram,
@@ -286,6 +287,7 @@ def create_app() -> FastAPI:
     application.include_router(media.router)
     application.include_router(admin.router)
     application.include_router(midtrans.router)
+    application.include_router(nowpayments.router)
 
     # ---------------------------------------------------------
     # Phone Login
