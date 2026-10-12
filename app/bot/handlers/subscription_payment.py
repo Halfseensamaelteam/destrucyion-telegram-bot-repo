@@ -58,6 +58,12 @@ async def subscription_payment_callback(
                     callback_data="subscription_buy_lifetime",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    "💠 Bayar dengan Crypto (NOWPayments)",
+                    callback_data="nowpayments_menu",
+                )
+            ],
         ]
 
         await query.edit_message_text(
@@ -68,6 +74,62 @@ async def subscription_payment_callback(
         )
         return
 
+    # NOWPayments menu is separate from the existing IDR/QRIS flow.
+    if data == "nowpayments_menu":
+        keyboard = [
+            [InlineKeyboardButton("🗓️ Weekly — 4 USDT", callback_data="nowpayments_plan_weekly")],
+            [InlineKeyboardButton("📅 Monthly — 8 USDT", callback_data="nowpayments_plan_monthly")],
+            [InlineKeyboardButton("👑 Lifetime — 300 USDT", callback_data="nowpayments_plan_lifetime")],
+        ]
+        await query.edit_message_text(
+            "💠 *Pembayaran Crypto*\n\n"
+            "Pilih paket. Nilai invoice memakai USD sebagai pendekatan USDT; jumlah koin final ditentukan NOWPayments saat invoice dibuat.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    nowpayments_plans = {
+        "nowpayments_plan_weekly": SubscriptionPlan.WEEKLY,
+        "nowpayments_plan_monthly": SubscriptionPlan.MONTHLY,
+        "nowpayments_plan_lifetime": SubscriptionPlan.LIFETIME,
+    }
+    selected_crypto_plan = nowpayments_plans.get(data)
+    if selected_crypto_plan is not None:
+        await query.edit_message_text("⏳ Membuat invoice checkout NOWPayments...")
+        try:
+            from app.services.nowpayments_subscription import NOWPaymentsSubscriptionService
+            crypto_service = NOWPaymentsSubscriptionService(session)
+            payment, checkout_url = await crypto_service.create_invoice(
+                user_id=user.id,
+                plan=selected_crypto_plan,
+            )
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            await query.edit_message_text(
+                "❌ Invoice belum dapat dibuat. Periksa konfigurasi NOWPayments dan coba lagi."
+            )
+            return
+
+        if not checkout_url.startswith("https://"):
+            await query.edit_message_text("❌ NOWPayments tidak mengembalikan link checkout HTTPS yang valid.")
+            return
+
+        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=checkout_url)]]
+        await query.edit_message_text(
+            "💠 *INVOICE PEMBAYARAN CRYPTO*\n\n"
+            + "📦 *Paket:* " + selected_crypto_plan.value.title() + "\n"
+            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD (mendekati harga USDT)\n"
+            + "🆔 *Order ID:* `" + payment.order_id + "`\n"
+            + "⏳ *Status:* Menunggu pembayaran\n\n"
+            + "Tekan tombol di bawah untuk membuka checkout resmi NOWPayments. Pilih aset dan jaringan yang tersedia di halaman checkout. "
+            + "Subscription hanya aktif setelah pembayaran diverifikasi oleh server.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
+        )
+        return
     plans = {
         "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
         "subscription_buy_monthly": SubscriptionPlan.MONTHLY,

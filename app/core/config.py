@@ -190,6 +190,46 @@ class Settings(BaseSettings):
         default="",
         description="Public URL where Midtrans sends payment notifications.",
     )
+    # ------------------------------------------------------------------
+    # NOWPayments
+    # ------------------------------------------------------------------
+    nowpayments_environment: Literal["sandbox", "production"] = Field(
+        default="production",
+        description="NOWPayments API environment. Sandbox and production credentials are kept separate.",
+    )
+    nowpayments_sandbox_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="NOWPayments sandbox API key. Used only when NOWPAYMENTS_ENVIRONMENT=sandbox.",
+    )
+    nowpayments_sandbox_ipn_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="NOWPayments sandbox IPN secret. Used only when NOWPAYMENTS_ENVIRONMENT=sandbox.",
+    )
+    nowpayments_sandbox_base_url: str = Field(
+        default="https://api-sandbox.nowpayments.io/v1",
+        description="Official NOWPayments sandbox API base URL.",
+    )
+    nowpayments_api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="NOWPayments API key. Never expose this value.",
+    )
+    nowpayments_ipn_secret: SecretStr = Field(
+        default=SecretStr(""),
+        description="NOWPayments IPN Secret Key used to verify webhook signatures.",
+    )
+    nowpayments_ipn_callback_url: str = Field(
+        default="",
+        description="Public HTTPS URL for the NOWPayments IPN callback endpoint.",
+    )
+    nowpayments_pay_currency: str = Field(
+        default="usdttrc20",
+        description="NOWPayments pay_currency code; intended initial network is USDT TRC20.",
+    )
+    nowpayments_base_url: str = Field(
+        default="https://api.nowpayments.io/v1",
+        description="NOWPayments API base URL.",
+    )
+
     subscription_weekly_price: int = Field(
         default=8000,
         description="Weekly subscription price in IDR.",
@@ -221,6 +261,27 @@ class Settings(BaseSettings):
         if self.app_env != "development" and parsed.scheme != "https":
             raise ValueError("web_base_url must use HTTPS outside development")
         return self
+
+    @property
+    def nowpayments_active_api_key(self) -> SecretStr:
+        """Return credentials only for the explicitly selected NOWPayments environment."""
+        if self.nowpayments_environment == "sandbox":
+            return self.nowpayments_sandbox_api_key
+        return self.nowpayments_api_key
+
+    @property
+    def nowpayments_active_ipn_secret(self) -> SecretStr:
+        """Return the IPN secret matching the selected NOWPayments environment."""
+        if self.nowpayments_environment == "sandbox":
+            return self.nowpayments_sandbox_ipn_secret
+        return self.nowpayments_ipn_secret
+
+    @property
+    def nowpayments_active_base_url(self) -> str:
+        """Return the API base URL matching the selected NOWPayments environment."""
+        if self.nowpayments_environment == "sandbox":
+            return self.nowpayments_sandbox_base_url
+        return self.nowpayments_base_url
 
     @property
     def is_production(self) -> bool:
