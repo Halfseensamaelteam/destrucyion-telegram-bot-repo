@@ -56,12 +56,15 @@ class NOWPaymentsPaymentRepository:
     async def get_by_order_id(
         self,
         order_id: str,
+        *,
+        for_update: bool = False,
     ) -> NOWPaymentsPayment | None:
-        result = await self.session.execute(
-            select(NOWPaymentsPayment).where(
-                NOWPaymentsPayment.order_id == order_id
-            )
+        statement = select(NOWPaymentsPayment).where(
+            NOWPaymentsPayment.order_id == order_id
         )
+        if for_update:
+            statement = statement.with_for_update()
+        result = await self.session.execute(statement)
         return result.scalar_one_or_none()
 
     async def get_by_provider_payment_id(
