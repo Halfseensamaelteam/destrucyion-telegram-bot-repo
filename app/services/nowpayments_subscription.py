@@ -28,7 +28,7 @@ NOWPAYMENTS_PLAN_PRICES_USD: dict[SubscriptionPlan, Decimal] = {
 
 
 class NOWPaymentsSubscriptionService:
-    """Create and persist currency-specific NOWPayments payment instructions."""
+    """Create and persist a hosted NOWPayments invoice."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -42,13 +42,13 @@ class NOWPaymentsSubscriptionService:
         plan: SubscriptionPlan,
         pay_currency: str,
     ) -> tuple[NOWPaymentsPayment, str]:
-        """Create a currency-specific payment and persist its identifiers/address."""
+        """Create a hosted invoice and persist its ID and checkout URL."""
         price_usd = NOWPAYMENTS_PLAN_PRICES_USD.get(plan)
         if price_usd is None:
             raise ValueError("Unsupported subscription plan.")
 
         order_id = f"NP-{uuid4().hex}"
-        provider_payment = await self.provider.create_payment(
+        provider_invoice = await self.provider.create_invoice(
             price_usd=price_usd,
             order_id=order_id,
             description=f"{plan.value.title()} subscription",
@@ -60,10 +60,9 @@ class NOWPaymentsSubscriptionService:
             order_id=order_id,
             plan=plan.value,
             price_amount=price_usd,
-            pay_currency=str(provider_payment["pay_currency"]).strip().lower(),
-            provider_payment_id=str(provider_payment["payment_id"]),
-            pay_address=str(provider_payment["pay_address"]),
-            pay_amount=Decimal(str(provider_payment["pay_amount"])),
-            payment_status=str(provider_payment.get("payment_status", "waiting")),
+            pay_currency=pay_currency.strip().lower(),
+            invoice_id=str(provider_invoice["id"]),
+            invoice_url=str(provider_invoice["invoice_url"]),
+            payment_status="waiting",
         )
-        return payment, payment.pay_address or ""
+        return payment, str(provider_invoice["invoice_url"])
