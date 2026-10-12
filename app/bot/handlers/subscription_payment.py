@@ -58,6 +58,12 @@ async def subscription_payment_callback(
                     callback_data="subscription_buy_lifetime",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    "💠 Bayar dengan Crypto (NOWPayments)",
+                    callback_data="nowpayments_menu",
+                )
+            ],
         ]
 
         await query.edit_message_text(
@@ -76,7 +82,7 @@ async def subscription_payment_callback(
             [InlineKeyboardButton("👑 Lifetime — 300 USDT", callback_data="nowpayments_plan_lifetime")],
         ]
         await query.edit_message_text(
-            "💠 *Pembayaran Crypto*\\n\\n"
+            "💠 *Pembayaran Crypto*\n\n"
             "Pilih paket. Nilai invoice memakai USD sebagai pendekatan USDT; jumlah koin final ditentukan NOWPayments saat invoice dibuat.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -97,7 +103,7 @@ async def subscription_payment_callback(
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Kembali", callback_data="nowpayments_menu")])
         await query.edit_message_text(
-            "💠 *Paket " + selected_crypto_plan.value.title() + "*\\n\\nPilih aset dan jaringan pembayaran:",
+            "💠 *Paket " + selected_crypto_plan.value.title() + "*\n\nPilih aset dan jaringan pembayaran:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -130,12 +136,12 @@ async def subscription_payment_callback(
             return
         keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=invoice_url)]]
         await query.edit_message_text(
-            "💠 *Invoice Pembayaran Crypto*\\n\\n"
-            + "📦 *Paket:* " + selected_plan.value.title() + "\\n"
-            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD\\n"
-            + "🪙 *Aset:* " + pay_currency.upper() + "\\n"
-            + "🆔 *Order ID:* " + payment.order_id + "\\n"
-            + "⏳ *Status:* Menunggu pembayaran\\n\\n"
+            "💠 *Invoice Pembayaran Crypto*\n\n"
+            + "📦 *Paket:* " + selected_plan.value.title() + "\n"
+            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD\n"
+            + "🪙 *Aset:* " + pay_currency.upper() + "\n"
+            + "🆔 *Order ID:* " + payment.order_id + "\n"
+            + "⏳ *Status:* Menunggu pembayaran\n\n"
             + "Aktivasi dilakukan setelah webhook pembayaran diverifikasi.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
