@@ -40,7 +40,6 @@ class NOWPaymentsSubscriptionService:
         *,
         user_id: int,
         plan: SubscriptionPlan,
-        pay_currency: str,
     ) -> tuple[NOWPaymentsPayment, str]:
         """Create a hosted invoice and persist its ID and checkout URL."""
         price_usd = NOWPAYMENTS_PLAN_PRICES_USD.get(plan)
@@ -52,7 +51,6 @@ class NOWPaymentsSubscriptionService:
             price_usd=price_usd,
             order_id=order_id,
             description=f"{plan.value.title()} subscription",
-            pay_currency=pay_currency,
         )
 
         payment = await self.repository.create(
@@ -60,7 +58,8 @@ class NOWPaymentsSubscriptionService:
             order_id=order_id,
             plan=plan.value,
             price_amount=price_usd,
-            pay_currency=pay_currency.strip().lower(),
+            # Customer chooses the actual asset on the hosted checkout.
+            pay_currency="checkout",
             invoice_id=str(provider_invoice["id"]),
             invoice_url=str(provider_invoice["invoice_url"]),
             payment_status="waiting",
