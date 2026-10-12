@@ -134,32 +134,25 @@ async def subscription_payment_callback(
                 "❌ Invoice belum dapat dibuat. Periksa konfigurasi NOWPayments dan kode mata uang, lalu coba lagi."
             )
             return
-        if not payment.pay_address or payment.pay_amount is None:
+        if not invoice_url or not invoice_url.startswith("https://"):
             await query.edit_message_text(
-                "❌ NOWPayments tidak mengembalikan alamat atau jumlah pembayaran yang valid."
+                "❌ NOWPayments tidak mengembalikan link checkout HTTPS yang valid."
             )
             return
 
+        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=invoice_url)]]
         await query.edit_message_text(
-            "💠 Detail pembayaran crypto dibuat. Scan QR di pesan berikutnya."
-        )
-        qr_image = render_payment_qr_png(payment.pay_address)
-        caption = (
-            "💠 *PEMBAYARAN CRYPTO*\n\n"
+            "💠 *INVOICE PEMBAYARAN CRYPTO*\n\n"
             + "📦 *Paket:* " + selected_plan.value.title() + "\n"
-            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD (mendekati harga USDT)\n"
-            + "🪙 *Aset/jaringan:* " + pay_currency.upper() + "\n"
-            + "💰 *Jumlah yang harus dikirim:* " + str(payment.pay_amount) + " " + pay_currency.upper() + "\n"
-            + "📬 *Alamat wallet:* `" + payment.pay_address + "`\n"
+            + "💵 *Harga:* " + str(payment.price_amount) + " USD (acuan harga paket USDT)\n"
+            + "🪙 *Aset pilihan:* " + pay_currency.upper() + "\n"
             + "🆔 *Order ID:* `" + payment.order_id + "`\n"
             + "⏳ *Status:* Menunggu pembayaran\n\n"
-            + "QR ini berisi alamat wallet saja. Pastikan jaringan benar dan kirim jumlah yang tepat seperti di atas. "
-            + "Jangan kirim aset dari jaringan lain. Subscription aktif setelah pembayaran terverifikasi."
-        )
-        await query.message.reply_photo(
-            photo=qr_image,
-            caption=caption,
+            + "Tekan tombol di bawah untuk membuka checkout resmi NOWPayments. Periksa aset, jaringan, dan jumlah sebelum membayar. "
+            + "Subscription hanya aktif setelah pembayaran diverifikasi oleh server.",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True,
         )
         return
 
