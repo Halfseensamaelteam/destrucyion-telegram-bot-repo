@@ -60,6 +60,12 @@ async def subscription_command(
                     callback_data="subscription_buy_lifetime",
                 )
             ],
+            [
+                InlineKeyboardButton(
+                    "💠 Bayar dengan Crypto (NOWPayments)",
+                    callback_data="nowpayments_menu",
+                )
+            ],
         ]
 
         if update.message:
