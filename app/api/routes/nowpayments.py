@@ -35,7 +35,7 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
         raise HTTPException(status_code=400, detail="Invalid IPN payload.")
 
     settings = get_settings()
-    ipn_secret = settings.nowpayments_ipn_secret.get_secret_value().strip()
+    ipn_secret = settings.nowpayments_active_ipn_secret.get_secret_value().strip()
     if not ipn_secret:
         log.error("NOWPayments IPN secret is not configured")
         raise HTTPException(status_code=503, detail="NOWPayments IPN is not configured.")

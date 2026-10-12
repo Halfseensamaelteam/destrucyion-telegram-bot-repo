@@ -13,6 +13,7 @@ import hmac
 import json
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -35,14 +36,26 @@ class NOWPaymentsService:
 
     def __init__(self) -> None:
         settings = get_settings()
-        self._api_key = settings.nowpayments_api_key.get_secret_value().strip()
-        self._base_url = settings.nowpayments_base_url.rstrip("/")
+        self._environment = settings.nowpayments_environment
+        self._api_key = settings.nowpayments_active_api_key.get_secret_value().strip()
+        self._base_url = settings.nowpayments_active_base_url.rstrip("/")
         self._ipn_callback_url = settings.nowpayments_ipn_callback_url.strip()
+
+        expected_host = (
+            "api-sandbox.nowpayments.io"
+            if self._environment == "sandbox"
+            else "api.nowpayments.io"
+        )
+        actual_host = urlparse(self._base_url).hostname
+        if actual_host != expected_host:
+            raise NOWPaymentsError(
+                f"NOWPayments {self._environment} mode requires API host {expected_host}."
+            )
 
     def _headers(self) -> dict[str, str]:
         if not self._api_key:
             raise NOWPaymentsError(
-                "NOWPayments API key is not configured. Set NOWPAYMENTS_API_KEY."
+                "NOWPayments API key is not configured for the selected environment."
             )
         return {
             "x-api-key": self._api_key,
