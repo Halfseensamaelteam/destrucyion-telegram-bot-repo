@@ -1,5 +1,5 @@
 """
-NOWPayments subscription invoice orchestration.
+NOWPayments subscription payment orchestration.
 
 This service is separate from PaymentService to preserve the existing Midtrans
 QRIS behavior. Prices currently use USD-equivalent amounts because the
@@ -28,7 +28,7 @@ NOWPAYMENTS_PLAN_PRICES_USD: dict[SubscriptionPlan, Decimal] = {
 
 
 class NOWPaymentsSubscriptionService:
-    """Create and persist hosted invoices for subscription plans."""
+    """Create and persist currency-specific NOWPayments payment instructions."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -42,7 +42,7 @@ class NOWPaymentsSubscriptionService:
         plan: SubscriptionPlan,
         pay_currency: str,
     ) -> tuple[NOWPaymentsPayment, str]:
-        """Create a hosted invoice and persist its identifiers and URL."""
+        """Create a currency-specific payment and persist its identifiers/address."""
         price_usd = NOWPAYMENTS_PLAN_PRICES_USD.get(plan)
         if price_usd is None:
             raise ValueError("Unsupported subscription plan.")
