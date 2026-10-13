@@ -19,7 +19,6 @@ from app.bot.handlers.start import start_command, help_command, status_command
 from app.bot.handlers.account import (
     accounts_command,
     connect_start,
-    connect_phone_command,
     connect_api_id,
     connect_api_hash,
     connect_cancel,
