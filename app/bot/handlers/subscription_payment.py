@@ -75,9 +75,9 @@ async def subscription_payment_callback(
     # NOWPayments menu is separate from the existing IDR/QRIS flow.
     if data == "nowpayments_menu":
         keyboard = [
-            [InlineKeyboardButton("🗓️ Weekly — 4 USDT", callback_data="nowpayments_plan_weekly")],
-            [InlineKeyboardButton("📅 Monthly — 8 USDT", callback_data="nowpayments_plan_monthly")],
-            [InlineKeyboardButton("📆 3 Bulan — 20 USD", callback_data="nowpayments_plan_quarterly")],
+            [InlineKeyboardButton("🗓️ Weekly — 6 USDT", callback_data="nowpayments_plan_weekly")],
+            [InlineKeyboardButton("📅 Monthly — 24 USDT", callback_data="nowpayments_plan_monthly")],
+            [InlineKeyboardButton("📆 3 Bulan — 72 USD", callback_data="nowpayments_plan_quarterly")],
         ]
         await query.edit_message_text(
             "💠 *Pembayaran Crypto*\n\n"

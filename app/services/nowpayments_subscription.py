@@ -21,9 +21,9 @@ from app.services.nowpayments import NOWPaymentsService
 # on an approximately 1:1 USD/USDT basis; do not describe this as an exact
 # USDT-denominated invoice until that pricing behavior is explicitly accepted.
 NOWPAYMENTS_PLAN_PRICES_USD: dict[SubscriptionPlan, Decimal] = {
-    SubscriptionPlan.WEEKLY: Decimal("4.00"),
-    SubscriptionPlan.MONTHLY: Decimal("8.00"),
-    SubscriptionPlan.QUARTERLY: Decimal("20.00"),
+    SubscriptionPlan.WEEKLY: Decimal("6.00"),
+    SubscriptionPlan.MONTHLY: Decimal("24.00"),
+    SubscriptionPlan.QUARTERLY: Decimal("72.00"),
 }
 
 
