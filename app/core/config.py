@@ -150,6 +150,14 @@ class Settings(BaseSettings):
         description="Public HTTPS base URL used for one-time browser login links.",
     )
 
+    subscription_checkout_url: str = Field(
+        default="",
+        description=(
+            "HTTPS URL for the independent external subscription checkout. "
+            "Keep empty until the external checkout page is deployed."
+        ),
+    )
+
     # ------------------------------------------------------------------
     # Webhook
     # ------------------------------------------------------------------
