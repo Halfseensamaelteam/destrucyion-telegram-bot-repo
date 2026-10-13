@@ -1,7 +1,11 @@
 """
 app.bot.handlers.subscription_payment
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Payment callbacks for subscription purchases.
+Subscription plan menu callbacks.
+
+Digital subscriptions are not checked out through third-party payment links
+inside Telegram. QRIS and crypto checkout must be implemented on an independent
+external sales channel, not initiated from this bot.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,11 +13,8 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from app.bot.dependencies import with_db_and_user
-from app.bot.payment_qr_utils import render_payment_qr_png
 from app.core.config import get_settings
-from app.db.models.subscription import SubscriptionPlan
 from app.db.models.user import User
-from app.services.payment import PaymentService
 
 
 def _format_idr(amount: int) -> str:
@@ -27,18 +28,17 @@ async def subscription_payment_callback(
     session: AsyncSession,
     user: User,
 ) -> None:
-    """Handle subscription plan selection and send the QRIS code."""
+    """Show subscription plans without starting a third-party in-bot checkout."""
 
     query = update.callback_query
     if query is None:
         return
 
     await query.answer()
-
     data = query.data or ""
     settings = get_settings()
 
-    if data == "subscription_add_plan":
+    if data in {"subscription_add_plan", "nowpayments_menu"}:
         keyboard = [
             [
                 InlineKeyboardButton(
@@ -54,113 +54,40 @@ async def subscription_payment_callback(
             ],
             [
                 InlineKeyboardButton(
-                    f"🗓️ 3 Bulan — {_format_idr(settings.subscription_quarterly_price)}",
+                    f"🗓️ 3 Months — {_format_idr(settings.subscription_quarterly_price)}",
                     callback_data="subscription_buy_quarterly",
                 )
             ],
         ]
-
         await query.edit_message_text(
-            "➕ *Tambahkan Plan*\n\n"
-            "Pilih plan tambahan:",
+            "⭐ *Pilih Paket Subscription*\n\n"
+            "🗓️ Weekly: " + _format_idr(settings.subscription_weekly_price) + "\n"
+            "📅 Monthly: " + _format_idr(settings.subscription_monthly_price) + "\n"
+            "🗓️ 3 Months: " + _format_idr(settings.subscription_quarterly_price) + "\n\n"
+            "Pilih paket untuk melihat status pembelian.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
 
-    # NOWPayments checkout is intentionally disabled for in-bot digital
-    # subscriptions until a Telegram Stars-compliant flow is implemented.
-    if data == "nowpayments_menu" or data.startswith("nowpayments_plan_"):
+    if data in {
+        "subscription_buy_weekly",
+        "subscription_buy_monthly",
+        "subscription_buy_quarterly",
+        "subscription_buy_lifetime",
+        "nowpayments_plan_weekly",
+        "nowpayments_plan_monthly",
+        "nowpayments_plan_quarterly",
+        "nowpayments_plan_lifetime",
+    }:
         await query.edit_message_text(
-            "⚠️ Pembayaran crypto untuk subscription di dalam bot sedang dinonaktifkan. "
-            "Silakan gunakan metode pembayaran yang tersedia di menu."
-        )
-        return
-
-    plans = {
-        "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
-        "subscription_buy_monthly": SubscriptionPlan.MONTHLY,
-        "subscription_buy_quarterly": SubscriptionPlan.QUARTERLY,
-    }
-
-    plan = plans.get(data)
-
-    if plan is None:
-        await query.edit_message_text(
-            "⚠️ Opsi langganan tidak valid. Silakan gunakan /subscription kembali."
+            "ℹ️ Pembelian subscription digital melalui QRIS atau crypto belum "
+            "tersedia langsung di dalam bot Telegram. Bot ini tidak akan membuat "
+            "tagihan pihak ketiga dari menu Telegram. Silakan kembali lagi setelah "
+            "kanal checkout eksternal yang terpisah siap digunakan."
         )
         return
 
     await query.edit_message_text(
-        "⏳ Memproses pembayaran QRIS Anda..."
-    )
-
-    payment_service = PaymentService(session)
-
-    try:
-        payment = await payment_service.create_qris_payment(
-            user_id=user.id,
-            plan=plan,
-        )
-
-        await session.commit()
-
-    except Exception as exc:
-        await session.rollback()
-        await query.edit_message_text(
-            f"❌ Gagal membuat pembayaran:\n{exc}"
-        )
-        return
-
-    if not payment.qr_string:
-        await query.message.reply_text(
-            "⚠️ Pembayaran dibuat, tetapi kode QRIS tidak ditemukan."
-        )
-        return
-
-    qr_image = render_payment_qr_png(payment.qr_string)
-
-    qr_image_url = None
-
-    if payment.transaction_id:
-        qr_image_url = (
-            "https://api.sandbox.midtrans.com/v2/qris/"
-            f"{payment.transaction_id}/qr-code"
-        )
-
-    if payment.expiry_time is not None:
-        expiry_text = payment.expiry_time.strftime(
-            "%Y-%m-%d %H:%M:%S WIB"
-        )
-    else:
-        expiry_text = "Tidak disediakan oleh Midtrans"
-
-    caption = (
-        "💳 *TAGIHAN PEMBAYARAN*\n\n"
-        f"📦 *Plan:* {plan.value.title()}\n"
-        f"💰 *Jumlah:* {_format_idr(payment.amount)}\n"
-        f"🆔 *Order ID:* `{payment.order_id}`\n\n"
-        "⏳ *Status:* PENDING\n"
-        f"⏰ *Batas Waktu:* {expiry_text}\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📲 *CARA PEMBAYARAN*\n"
-        "Scan kode QRIS di atas menggunakan "
-        "aplikasi pembayaran atau e-wallet pilihan Anda.\n\n"
-    )
-
-    if qr_image_url:
-        caption += (
-            "🖼️ *Link Gambar QR Code*\n"
-            f"{qr_image_url}\n\n"
-        )
-
-    caption += (
-        "⚠️ Harap selesaikan pembayaran sebelum "
-        "masa berlaku QRIS habis."
-    )
-
-    await query.message.reply_photo(
-        photo=qr_image,
-        caption=caption,
-        parse_mode="Markdown",
+        "⚠️ Opsi langganan tidak valid. Silakan gunakan /subscription kembali."
     )
