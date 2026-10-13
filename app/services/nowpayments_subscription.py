@@ -23,7 +23,7 @@ from app.services.nowpayments import NOWPaymentsService
 NOWPAYMENTS_PLAN_PRICES_USD: dict[SubscriptionPlan, Decimal] = {
     SubscriptionPlan.WEEKLY: Decimal("4.00"),
     SubscriptionPlan.MONTHLY: Decimal("8.00"),
-    SubscriptionPlan.LIFETIME: Decimal("300.00"),
+    SubscriptionPlan.QUARTERLY: Decimal("20.00"),
 }
 
 

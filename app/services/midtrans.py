@@ -40,6 +40,7 @@ class MidtransService:
         prices = {
             SubscriptionPlan.WEEKLY: settings.subscription_weekly_price,
             SubscriptionPlan.MONTHLY: settings.subscription_monthly_price,
+            SubscriptionPlan.QUARTERLY: settings.subscription_3_monthly_price,
             SubscriptionPlan.LIFETIME: settings.subscription_lifetime_price,
         }
 

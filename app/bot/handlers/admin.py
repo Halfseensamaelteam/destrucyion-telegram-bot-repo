@@ -32,7 +32,7 @@ async def admin_command(
             "Commands:\n"
             "- `users`: View user and account statistics\n"
             "- `subs`: View subscription statistics\n"
-            "- `grant <telegram_id> <weekly|monthly|lifetime>`: Give a subscription\n"
+            "- `grant <telegram_id> <weekly|monthly|quarterly|lifetime>`: Give a subscription\n"
             "- `revoke <telegram_id>`: Cancel a subscription",
             parse_mode="Markdown"
         )
@@ -93,7 +93,7 @@ async def _find_target_user(
 
 
 async def _admin_grant(update: Update, context: ContextTypes.DEFAULT_TYPE, session: AsyncSession) -> None:
-    """/admin grant <telegram_id> <weekly|monthly|lifetime>"""
+    """/admin grant <telegram_id> <weekly|monthly|quarterly|lifetime>"""
     args = context.args[1:]
     valid_plans = ", ".join(p.value for p in SubscriptionPlan)
     if len(args) != 2:

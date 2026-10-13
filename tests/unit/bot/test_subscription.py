@@ -35,6 +35,11 @@ async def test_no_subscription_shows_free_tier_message():
 
     text = update.message.reply_text.call_args.args[0]
     assert "tidak memiliki langganan aktif" in text
+    markup = update.message.reply_text.call_args.kwargs["reply_markup"]
+    callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
+    assert "subscription_qris_menu" in callback_data
+    assert "nowpayments_menu" in callback_data
+    assert "subscription_buy_lifetime" not in callback_data
 
 
 async def test_lifetime_subscription_does_not_crash_on_none_expiry():

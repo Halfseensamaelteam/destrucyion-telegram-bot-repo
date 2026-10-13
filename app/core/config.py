@@ -238,6 +238,10 @@ class Settings(BaseSettings):
         default=30000,
         description="Monthly subscription price in IDR.",
     )
+    subscription_3_monthly_price: int = Field(
+        default=90000,
+        description="Three-month subscription price in IDR.",
+    )
     subscription_lifetime_price: int = Field(
         default=2000000,
         description="Lifetime subscription price in IDR.",

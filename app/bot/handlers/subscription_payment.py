@@ -61,8 +61,8 @@ async def subscription_payment_callback(
                 callback_data="subscription_buy_monthly",
             )],
             [InlineKeyboardButton(
-                f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
-                callback_data="subscription_buy_lifetime",
+                f"📆 3 Bulan — {_format_idr(settings.subscription_3_monthly_price)}",
+                callback_data="subscription_buy_quarterly",
             )],
         ]
         await query.edit_message_text(
@@ -77,11 +77,12 @@ async def subscription_payment_callback(
         keyboard = [
             [InlineKeyboardButton("🗓️ Weekly — 4 USDT", callback_data="nowpayments_plan_weekly")],
             [InlineKeyboardButton("📅 Monthly — 8 USDT", callback_data="nowpayments_plan_monthly")],
-            [InlineKeyboardButton("👑 Lifetime — 300 USDT", callback_data="nowpayments_plan_lifetime")],
+            [InlineKeyboardButton("📆 3 Bulan — 20 USD", callback_data="nowpayments_plan_quarterly")],
         ]
         await query.edit_message_text(
             "💠 *Pembayaran Crypto*\n\n"
-            "Pilih paket. Nilai invoice memakai USD sebagai pendekatan USDT; jumlah koin final ditentukan NOWPayments saat invoice dibuat.",
+            "Pilih paket. Harga invoice menggunakan USD sebagai acuan; jumlah koin final ditentukan NOWPayments saat invoice dibuat.\n"
+            "*Harga crypto dapat berbeda dari harga QRIS.*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -90,7 +91,7 @@ async def subscription_payment_callback(
     nowpayments_plans = {
         "nowpayments_plan_weekly": SubscriptionPlan.WEEKLY,
         "nowpayments_plan_monthly": SubscriptionPlan.MONTHLY,
-        "nowpayments_plan_lifetime": SubscriptionPlan.LIFETIME,
+        "nowpayments_plan_quarterly": SubscriptionPlan.QUARTERLY,
     }
     selected_crypto_plan = nowpayments_plans.get(data)
     if selected_crypto_plan is not None:
@@ -131,7 +132,7 @@ async def subscription_payment_callback(
     plans = {
         "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
         "subscription_buy_monthly": SubscriptionPlan.MONTHLY,
-        "subscription_buy_lifetime": SubscriptionPlan.LIFETIME,
+        "subscription_buy_quarterly": SubscriptionPlan.QUARTERLY,
     }
 
     plan = plans.get(data)
