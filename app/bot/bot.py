@@ -19,6 +19,7 @@ from app.bot.handlers.start import start_command, help_command, status_command
 from app.bot.handlers.account import (
     accounts_command,
     connect_start,
+    connect_phone_command,
     connect_api_id,
     connect_api_hash,
     connect_cancel,
@@ -50,7 +51,7 @@ def create_bot_app() -> Application:
     os.makedirs("data", exist_ok=True)
     # Use PicklePersistence so conversation states survive bot restarts
     persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
-    
+
     application = (
         Application.builder()
         .token(token)
@@ -62,13 +63,16 @@ def create_bot_app() -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
-    
+
     # Subscription
     application.add_handler(CommandHandler("subscription", subscription_command))
     application.add_handler(
         CallbackQueryHandler(
             subscription_payment_callback,
-            pattern="^(subscription_buy_|subscription_add_plan$|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_)",
+            # Include every first-level payment-menu callback here.
+            # Without subscription_qris_menu, Telegram receives the click but
+            # no handler matches it, so the QRIS plan menu never opens.
+            pattern="^(subscription_qris_menu$|subscription_buy_|subscription_add_plan$|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_)",
         )
     )
 
@@ -126,8 +130,8 @@ def create_bot_app() -> Application:
 
 
 async def setup_webhook(application: Application, webhook_url: str) -> None:
-    """Set up the Telegram bot webhook.
-    
+    """Set up the bot webhook.
+
     Phase 18: Configure webhook for Vercel deployment.
     """
     await application.bot.set_webhook(url=webhook_url)
@@ -135,9 +139,6 @@ async def setup_webhook(application: Application, webhook_url: str) -> None:
 
 
 async def delete_webhook(application: Application) -> None:
-    """Delete the Telegram bot webhook.
-    
-    Phase 18: Clean up webhook when switching to long polling.
-    """
+    """Delete webhook when switching to long polling."""
     await application.bot.delete_webhook()
     print("Webhook deleted")
