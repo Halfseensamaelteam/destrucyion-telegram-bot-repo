@@ -59,17 +59,27 @@ async def test_factory_registers_incoming_only_automatic_handler():
     assert auto_builder.incoming is True
 
 
-async def test_factory_registers_owner_only_manual_trigger():
-    factory = ev.make_handler_factory(make_session_factory())
-    handlers = factory(make_manager(), 1)
+async def test_factory_registers_owner_only_manual_trigger(monkeypatch):
+    monkeypatch.setenv("SAVE_TRIGGER", ".saveit")
 
-    assert len(handlers) == 2
-    _, manual_builder = handlers[1]
-    assert manual_builder.outgoing is True  # only the account owner
-    assert manual_builder.pattern is not None
-    assert manual_builder.pattern(".saveit")
-    assert not manual_builder.pattern(".saveit please")
-    assert not manual_builder.pattern("hello .saveit")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    try:
+        factory = ev.make_handler_factory(make_session_factory())
+        handlers = factory(make_manager(), 1)
+
+        assert len(handlers) == 2
+
+        _, manual_builder = handlers[1]
+        assert manual_builder.outgoing is True
+        assert manual_builder.pattern is not None
+        assert manual_builder.pattern(".saveit")
+        assert not manual_builder.pattern(".saveit please")
+        assert not manual_builder.pattern("hello .saveit")
+    finally:
+        get_settings.cache_clear()
 
 
 async def test_trigger_can_be_disabled_with_empty_setting(monkeypatch):

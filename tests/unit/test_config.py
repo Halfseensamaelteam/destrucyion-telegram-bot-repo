@@ -45,6 +45,7 @@ class TestSettingsDefaults:
 class TestSettingsEnvOverride:
     def test_app_env_override(self, monkeypatch):
         monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("WEB_BASE_URL", "https://example.com")
         s = Settings()
         assert s.app_env == "production"
         assert s.is_production is True

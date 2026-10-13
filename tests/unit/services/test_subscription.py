@@ -104,3 +104,15 @@ async def test_renew_no_subscription_raises(db_session: AsyncSession, user):
     service = SubscriptionService(db_session)
     with pytest.raises(SubscriptionError):
         await service.renew_subscription(user.id)
+
+
+async def test_quarterly_subscription_expires_after_90_days(db_session: AsyncSession, user):
+    service = SubscriptionService(db_session)
+    start = datetime(2026, 10, 13, 0, 0, tzinfo=timezone.utc)
+
+    sub = await service.grant_subscription(
+        user.id, SubscriptionPlan.QUARTERLY, starts_at=start
+    )
+
+    assert sub.plan == SubscriptionPlan.QUARTERLY
+    assert sub.expires_at.replace(tzinfo=timezone.utc) == start + timedelta(days=90)

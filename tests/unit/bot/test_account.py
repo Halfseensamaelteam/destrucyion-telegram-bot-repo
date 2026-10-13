@@ -19,6 +19,7 @@ from app.bot.handlers.account import (
     connect_api_hash,
     connect_api_id,
     connect_start,
+    CONNECT_METHOD,
     maybe_capture_2fa_password,
 )
 from app.services.account import AccountAlreadyExistsError
@@ -48,8 +49,12 @@ async def test_connect_start_asks_for_api_id():
 
     result = await connect_start.__wrapped__(update, context, session, user)
 
-    assert result == ENTER_API_ID
+    assert result == CONNECT_METHOD
     update.message.reply_text.assert_called_once()
+
+    message = update.message.reply_text.call_args
+    assert "Choose how you want to connect" in message.args[0]
+    assert message.kwargs["reply_markup"] is not None
     assert context.user_data["user_id"] == 55
 
 

@@ -38,31 +38,19 @@ async def subscription_command(
             "⭐ *Status Langganan*\n\n"
             "Anda tidak memiliki langganan aktif.\n"
             "Saat ini Anda berada pada paket *Free*.\n\n"
-            "Pilih paket Premium di bawah ini:"
+            "Pilih metode pembayaran:"
         )
 
         keyboard = [
             [
                 InlineKeyboardButton(
-                    f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
-                    callback_data="subscription_buy_weekly",
+                    "🇮🇩 QRIS (Rupiah)",
+                    callback_data="subscription_qris_menu",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
-                    callback_data="subscription_buy_monthly",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
-                    callback_data="subscription_buy_lifetime",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "💠 Bayar dengan Crypto (NOWPayments)",
+                    "💠 Crypto Payment (NOWPayments)",
                     callback_data="nowpayments_menu",
                 )
             ],

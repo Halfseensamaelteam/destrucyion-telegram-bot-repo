@@ -32,6 +32,8 @@ class SubscriptionService:
             return start_date + timedelta(days=7)
         if plan == SubscriptionPlan.MONTHLY:
             return start_date + timedelta(days=30)
+        if plan == SubscriptionPlan.QUARTERLY:
+            return start_date + timedelta(days=90)
         if plan == SubscriptionPlan.LIFETIME:
             return None
         raise ValueError(f"Unknown subscription plan: {plan}")

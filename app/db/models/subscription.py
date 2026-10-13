@@ -26,6 +26,7 @@ class SubscriptionPlan(str, enum.Enum):
 
     WEEKLY = "weekly"
     MONTHLY = "monthly"
+    QUARTERLY = "quarterly"
     LIFETIME = "lifetime"
 
 
