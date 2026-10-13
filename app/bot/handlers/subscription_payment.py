@@ -40,35 +40,33 @@ async def subscription_payment_callback(
 
     if data == "subscription_add_plan":
         keyboard = [
-            [
-                InlineKeyboardButton(
-                    f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
-                    callback_data="subscription_buy_weekly",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
-                    callback_data="subscription_buy_monthly",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
-                    callback_data="subscription_buy_lifetime",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "💠 Bayar dengan Crypto (NOWPayments)",
-                    callback_data="nowpayments_menu",
-                )
-            ],
+            [InlineKeyboardButton("🇮🇩 QRIS (Rupiah)", callback_data="subscription_qris_menu")],
+            [InlineKeyboardButton("💠 Crypto Payment (NOWPayments)", callback_data="nowpayments_menu")],
         ]
-
         await query.edit_message_text(
-            "➕ *Tambahkan Plan*\n\n"
-            "Pilih plan tambahan:",
+            "➕ *Tambahkan Plan*\n\nPilih metode pembayaran:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data == "subscription_qris_menu":
+        keyboard = [
+            [InlineKeyboardButton(
+                f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
+                callback_data="subscription_buy_weekly",
+            )],
+            [InlineKeyboardButton(
+                f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
+                callback_data="subscription_buy_monthly",
+            )],
+            [InlineKeyboardButton(
+                f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
+                callback_data="subscription_buy_lifetime",
+            )],
+        ]
+        await query.edit_message_text(
+            "🇮🇩 *Pembayaran QRIS*\n\nPilih plan yang ingin dibeli:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
