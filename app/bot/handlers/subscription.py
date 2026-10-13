@@ -56,14 +56,8 @@ async def subscription_command(
             ],
             [
                 InlineKeyboardButton(
-                    f"👑 Lifetime — {_format_idr(settings.subscription_lifetime_price)}",
-                    callback_data="subscription_buy_lifetime",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "💠 Bayar dengan Crypto (NOWPayments)",
-                    callback_data="nowpayments_menu",
+                    f"🗓️ 3 Months — {_format_idr(settings.subscription_quarterly_price)}",
+                    callback_data="subscription_buy_quarterly",
                 )
             ],
         ]
