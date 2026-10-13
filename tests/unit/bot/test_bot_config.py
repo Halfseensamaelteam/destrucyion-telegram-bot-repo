@@ -36,3 +36,19 @@ def test_connect_conversation_has_a_timeout():
     handler = _find_connect_conversation(app)
     assert handler.conversation_timeout is not None
     assert handler.conversation_timeout > 0
+
+def test_subscription_handler_matches_qris_menu_callback():
+    """The QRIS button must be routed to the subscription payment callback."""
+    from telegram.ext import CallbackQueryHandler
+
+    app = create_bot_app()
+    handlers = [
+        handler
+        for group_handlers in app.handlers.values()
+        for handler in group_handlers
+        if isinstance(handler, CallbackQueryHandler)
+        and handler.callback.__name__ == "subscription_payment_callback"
+    ]
+    assert handlers, "subscription payment callback is not registered"
+    assert any(handler.pattern and handler.pattern.match("subscription_qris_menu") for handler in handlers)
+
