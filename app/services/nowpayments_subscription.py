@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.subscription import SubscriptionPlan
 from app.db.models.nowpayments_payment import NOWPaymentsPayment
 from app.db.repositories.nowpayments_payment_repo import NOWPaymentsPaymentRepository
-from app.services.nowpayments import NOWPaymentsService
+from app.services.nowpayments import (
+    NOWPaymentsService,
+    SUPPORTED_OUTCOME_CURRENCIES,
+)
 
 
 # Subscription price in USD. The actual coin amount is quoted by NOWPayments.
@@ -33,31 +36,43 @@ class NOWPaymentsSubscriptionService:
         self.provider = NOWPaymentsService()
         self.repository = NOWPaymentsPaymentRepository(session)
 
+    async def get_available_outcome_currencies(self) -> list[dict[str, str]]:
+        """Return supported destinations present in NOWPayments' live currency list."""
+        return await self.provider.get_available_outcome_currencies()
+
     async def get_available_payment_currencies(
-        self, *, plan: SubscriptionPlan
+        self, *, plan: SubscriptionPlan, outcome_currency: str
     ) -> list[dict[str, object]]:
-        """Return assets whose live minimum for USDC Base is at most $2."""
+        """Return source assets whose live minimum fits this plan and destination."""
         price_usd = NOWPAYMENTS_PLAN_PRICES_USD.get(plan)
         if price_usd is None:
             raise ValueError("Unsupported subscription plan.")
-        return await self.provider.get_available_payment_currencies(price_usd=price_usd)
+        return await self.provider.get_available_payment_currencies(
+            price_usd=price_usd, outcome_currency=outcome_currency
+        )
 
     async def create_payment(
-        self, *, user_id: int, plan: SubscriptionPlan, pay_currency: str
+        self, *, user_id: int, plan: SubscriptionPlan, pay_currency: str,
+        outcome_currency: str
     ) -> tuple[NOWPaymentsPayment, dict[str, object]]:
-        """Create and persist a payment in the customer's selected asset."""
+        """Create and persist a payment for the selected source/destination pair."""
         price_usd = NOWPAYMENTS_PLAN_PRICES_USD.get(plan)
         if price_usd is None:
             raise ValueError("Unsupported subscription plan.")
-        minimum = await self.provider.get_minimum_payment_amount(pay_currency=pay_currency)
+        if outcome_currency not in SUPPORTED_OUTCOME_CURRENCIES:
+            raise ValueError("Unsupported NOWPayments destination currency.")
+        minimum = await self.provider.get_minimum_payment_amount(
+            pay_currency=pay_currency, outcome_currency=outcome_currency
+        )
         if minimum["fiat_equivalent_usd"] > Decimal("2.00"):
-            raise ValueError("The minimum for this asset is currently above $2.")
+            raise ValueError("The minimum for this currency pair is currently above $2.")
         if price_usd < minimum["fiat_equivalent_usd"]:
             raise ValueError("The selected subscription price is below the current minimum.")
         order_id = f"NP-{uuid4().hex}"
         provider_payment = await self.provider.create_payment(
             price_usd=price_usd,
             pay_currency=pay_currency,
+            outcome_currency=outcome_currency,
             order_id=order_id,
             description=f"{plan.value.title()} subscription",
         )
