@@ -23,6 +23,11 @@ def upgrade() -> None:
             server_default="usdcbase",
         ),
     )
+    op.alter_column(
+        "nowpayments_payments",
+        "outcome_currency",
+        server_default=None,
+    )
 
 
 def downgrade() -> None:
