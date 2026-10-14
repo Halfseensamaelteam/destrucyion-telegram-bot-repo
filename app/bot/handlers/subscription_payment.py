@@ -201,11 +201,15 @@ async def subscription_payment_callback(
                 outcome_currency=target_currency,
             )
             await session.commit()
-        except Exception:
+        except Exception as exc:
             await session.rollback()
+            # The provider client limits this message to a short, safe API error
+            # detail. Never include request headers or credentials here.
+            error_detail = str(exc).strip()[:300] or exc.__class__.__name__
             await query.edit_message_text(
-                "❌ Pembayaran belum dapat dibuat. Minimum mungkin berubah atau pasangan tidak didukung. "
-                "Silakan kembali dan pilih aset lain.",
+                "❌ Pembayaran belum dapat dibuat.\n\n"
+                f"Detail: {error_detail}\n\n"
+                "Silakan kembali dan pilih aset lain atau kirim detail ini untuk diperiksa.",
             )
             return
         pay_amount = provider_payment.get("pay_amount")
