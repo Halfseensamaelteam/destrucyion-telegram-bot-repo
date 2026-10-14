@@ -71,6 +71,14 @@ class NOWPaymentsService:
         self._api_key = settings.nowpayments_active_api_key.get_secret_value().strip()
         self._base_url = settings.nowpayments_active_base_url.rstrip("/")
         self._ipn_callback_url = settings.nowpayments_ipn_callback_url.strip()
+        self._payout_addresses: dict[str, str] = {}
+        for item in settings.nowpayments_payout_addresses.split(","):
+            if "=" not in item:
+                continue
+            currency, address = item.split("=", 1)
+            currency, address = currency.strip().lower(), address.strip()
+            if currency and address and not address.startswith("YOUR_"):
+                self._payout_addresses[currency] = address
 
         expected_host = (
             "api-sandbox.nowpayments.io"
@@ -193,7 +201,7 @@ class NOWPaymentsService:
         return [
             {"code": code, "label": label}
             for code, label in SUPPORTED_OUTCOME_CURRENCIES.items()
-            if code in available_codes
+            if code in available_codes and code in self._payout_addresses
         ]
 
     async def get_available_payment_currencies(
@@ -270,45 +278,42 @@ class NOWPaymentsService:
         return result
 
     async def create_payment(
-        self,
-        *,
-        price_usd: Decimal,
-        pay_currency: str,
-        outcome_currency: str = OUTCOME_CURRENCY,
-        order_id: str,
-        description: str,
+        self, *, price_usd: Decimal, pay_currency: str,
+        outcome_currency: str = OUTCOME_CURRENCY, order_id: str, description: str,
     ) -> dict[str, Any]:
-        """Create a payment for an explicit source asset and payout currency."""
+        """Create an invoice then bind the chosen pay-in and payout currencies."""
         if price_usd <= 0:
             raise ValueError("price_usd must be greater than zero.")
-        normalized_currency = pay_currency.strip().lower()
-        normalized_outcome = outcome_currency.strip().lower()
-        if normalized_currency not in SUPPORTED_PAYMENT_CURRENCIES:
-            raise ValueError("Unsupported NOWPayments payment currency.")
-        if normalized_outcome not in SUPPORTED_OUTCOME_CURRENCIES:
+        source = pay_currency.strip().lower()
+        target = outcome_currency.strip().lower()
+        if source not in SUPPORTED_PAYMENT_CURRENCIES:
+            raise ValueError("Unsupported NOWPayments source currency.")
+        if target not in SUPPORTED_OUTCOME_CURRENCIES:
             raise ValueError("Unsupported NOWPayments destination currency.")
+        payout_address = self._payout_addresses.get(target)
+        if not payout_address:
+            raise NOWPaymentsError("The selected payout currency has no configured wallet address.")
         if not self._ipn_callback_url.startswith("https://"):
             raise NOWPaymentsError("NOWPayments IPN callback must be a public HTTPS URL.")
-
+        invoice = await self.create_invoice(
+            price_usd=price_usd, order_id=order_id, description=description
+        )
         result = await self._post(
-            "/payment",
+            "/invoice-payment",
             {
-                "price_amount": float(price_usd),
-                "price_currency": "usd",
-                "pay_currency": normalized_currency,
-                "payout_currency": normalized_outcome,
-                "ipn_callback_url": self._ipn_callback_url,
-                "order_id": order_id,
+                "iid": invoice["id"],
+                "pay_currency": source,
+                "payout_address": payout_address,
+                "payout_currency": target,
                 "order_description": description[:255],
             },
         )
+        result.setdefault("invoice_id", str(invoice["id"]))
         required = ("payment_id", "pay_address", "pay_amount", "pay_currency")
         if any(result.get(field) in (None, "") for field in required):
-            raise NOWPaymentsError(
-                "NOWPayments payment response is missing required payment details."
-            )
+            raise NOWPaymentsError("NOWPayments invoice-payment response is missing required payment details.")
+        result.setdefault("payout_currency", target)
         return result
-
     @staticmethod
     def verify_ipn_signature(
         payload: dict[str, Any],
