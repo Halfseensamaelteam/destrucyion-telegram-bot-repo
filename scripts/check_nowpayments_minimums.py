@@ -1,11 +1,10 @@
-"""Read-only NOWPayments minimum-amount diagnostic.
+"""Read-only diagnostic for NOWPayments minimum payment amounts.
 
 Run from the repository root:
     python scripts/check_nowpayments_minimums.py
 
-Uses the currently selected NOWPAYMENTS_ENVIRONMENT and never prints API keys.
-It checks source-asset -> configured outcome-wallet currency pairs; NOWPayments
-minimums are dynamic and depend on the exact pair/network/fee settings.
+Uses the selected NOWPAYMENTS_ENVIRONMENT. It never prints credentials and
+does not create invoices or payments.
 """
 from __future__ import annotations
 
@@ -17,27 +16,18 @@ import httpx
 from app.core.config import get_settings
 
 
-# Common low-minimum assets listed by NOWPayments documentation, plus assets
-# shown in the operator's payout-wallet configuration.
-SOURCE_CURRENCIES = (
+# Candidates commonly used for lower-cost payments; availability and minimums
+# must be checked against the merchant's live API response.
+CANDIDATE_CURRENCIES = (
+    "usdttrc20",
+    "usdcbase",
     "trx",
     "ltc",
     "xrp",
     "xlm",
     "bch",
     "bnbbsc",
-    "usdttrc20",
-    "usdcbase",
-    "ethbase",
-)
-OUTCOME_CURRENCIES = (
-    "ethbase",
-    "usdttrc20",
-    "usdcbase",
     "sol",
-    "btc",
-    "trx",
-    "bnbbsc",
     "matic",
 )
 
@@ -55,74 +45,62 @@ async def main() -> None:
 
     print(f"Environment: {settings.nowpayments_environment}")
     print(f"API host: {base_url}")
-    print("Read-only checks only; no payment/invoice will be created.")
-    print("Minimums can change with network fees and merchant wallet settings.\n")
+    print("Read-only checks only; no payment or invoice will be created.\n")
 
-    headers = {"x-api-key": api_key}
-    timeout = httpx.Timeout(20.0)
     async with httpx.AsyncClient(
         base_url=base_url,
-        headers=headers,
-        timeout=timeout,
+        headers={"x-api-key": api_key},
+        timeout=httpx.Timeout(20.0),
     ) as client:
-        for target in OUTCOME_CURRENCIES:
-            # Official endpoint supports fiat currency_from and returns the
-            # minimum for the specified outcome currency, useful as a first
-            # diagnostic of the destination-wallet configuration.
+        try:
+            currencies_response = await client.get("/currencies")
+            currencies_response.raise_for_status()
+            raw_currencies = currencies_response.json().get("currencies", [])
+            available = {str(code).lower() for code in raw_currencies}
+            print("Currencies endpoint responded successfully.")
+        except (httpx.HTTPError, ValueError) as exc:
+            available = set()
+            print(f"Could not retrieve currency list: {type(exc).__name__}")
+
+        print("\nUSD -> candidate currency minimums:")
+        for currency in CANDIDATE_CURRENCIES:
+            if available and currency not in available:
+                print(f"{currency}: not listed by /currencies for this account")
+                continue
             try:
                 response = await client.get(
                     "/min-amount",
                     params={
                         "currency_from": "usd",
-                        "currency_to": target,
+                        "currency_to": currency,
                         "fiat_equivalent": "usd",
                     },
                 )
                 if response.is_error:
-                    print(f"USD -> {target}: HTTP {response.status_code}")
+                    print(f"{currency}: HTTP {response.status_code}")
                     continue
                 data = response.json()
                 minimum = data.get("min_amount")
-                fiat = data.get("fiat_equivalent")
-                print(f"USD -> {target}: min_amount={minimum}, fiat_equivalent={fiat}")
+                equivalent = data.get("fiat_equivalent")
+                print(
+                    f"{currency}: min_amount={minimum}, "
+                    f"fiat_equivalent_usd={equivalent}"
+                )
+                if equivalent is not None:
+                    try:
+                        if Decimal(str(equivalent)) <= Decimal("2"):
+                            print("  -> API reports a minimum equivalent at or below $2")
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
             except (httpx.HTTPError, ValueError) as exc:
-                print(f"USD -> {target}: request/response error: {type(exc).__name__}")
-
-        print("\nCustomer source-asset -> payout-wallet pair checks:")
-        for source in SOURCE_CURRENCIES:
-            for target in OUTCOME_CURRENCIES:
-                try:
-                    response = await client.get(
-                        "/min-amount",
-                        params={
-                            "currency_from": source,
-                            "currency_to": target,
-                            "fiat_equivalent": "usd",
-                        },
-                    )
-                    if response.is_error:
-                        # Unsupported pairs are expected; keep output compact.
-                        continue
-                    data = response.json()
-                    minimum = data.get("min_amount")
-                    fiat = data.get("fiat_equivalent")
-                    if fiat is not None:
-                        try:
-                            usd_value = Decimal(str(fiat))
-                        except (InvalidOperation, TypeError, ValueError):
-                            usd_value = None
-                        if usd_value is not None and usd_value <= Decimal("5"):
-                            print(
-                                f"{source} -> {target}: min_amount={minimum}, "
-                                f"fiat_equivalent_usd={fiat}"
-                            )
-                except (httpx.HTTPError, ValueError):
-                    continue
+                print(f"{currency}: request/response error: {type(exc).__name__}")
 
     print(
-        "\nInterpretation: these are API-reported minimums for tested pairs, "
-        "not a guarantee that every hosted checkout choice will accept $2. "
-        "Compare them with the exact checkout error and NOWPayments Status Page."
+        "\nImportant: this checks the API-reported minimum for USD -> asset. "
+        "Hosted invoice checkout can apply additional account, currency, and "
+        "network constraints. Confirm the exact checkout error before changing "
+        "subscription prices. A payout wallet being configured does not lower "
+        "the customer's payment minimum."
     )
 
 
