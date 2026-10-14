@@ -107,7 +107,7 @@ async def subscription_payment_callback(
             await query.edit_message_text("❌ Tidak dapat memeriksa jaringan NOWPayments saat ini. Coba lagi nanti.")
             return
         if not targets:
-            await query.edit_message_text("⚠️ Tidak ada aset tujuan yang tersedia dari NOWPayments saat ini.")
+            await query.edit_message_text("⚠️ Belum ada wallet tujuan yang dikonfigurasi. Tambahkan alamat wallet yang Anda kontrol ke NOWPAYMENTS_PAYOUT_ADDRESSES di .env, lalu restart bot.")
             return
         keyboard = []
         for i in range(0, len(targets), 2):
