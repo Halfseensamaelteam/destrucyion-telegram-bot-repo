@@ -141,7 +141,10 @@ async def subscription_payment_callback(
             selected_crypto_plan = SubscriptionPlan(plan_value)
             from app.services.nowpayments import SUPPORTED_OUTCOME_CURRENCIES
             target_label = SUPPORTED_OUTCOME_CURRENCIES[target_currency]
-            from app.services.nowpayments_subscription import NOWPaymentsSubscriptionService
+            from app.services.nowpayments_subscription import (
+                NOWPAYMENTS_PLAN_PRICES_USD,
+                NOWPaymentsSubscriptionService,
+            )
             crypto_service = NOWPaymentsSubscriptionService(session)
             currencies = await crypto_service.get_available_payment_currencies(
                 plan=selected_crypto_plan, outcome_currency=target_currency
