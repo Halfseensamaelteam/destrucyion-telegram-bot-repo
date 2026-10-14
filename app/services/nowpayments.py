@@ -120,10 +120,20 @@ class NOWPaymentsService:
             ) from exc
 
         if response.is_error:
-            # Avoid returning raw provider response text, which may contain
-            # implementation details. The status code is enough for logs/UI.
+            # Preserve only the provider's short error message for diagnostics.
+            # Never log request headers or the API key.
+            provider_message = ""
+            try:
+                error_body = response.json()
+                if isinstance(error_body, dict):
+                    candidate = error_body.get("message") or error_body.get("error")
+                    if isinstance(candidate, str):
+                        provider_message = candidate[:300]
+            except ValueError:
+                pass
+            detail = f" Details: {provider_message}" if provider_message else ""
             raise NOWPaymentsError(
-                f"NOWPayments API returned HTTP {response.status_code}."
+                f"NOWPayments API returned HTTP {response.status_code}.{detail}"
             )
 
         try:
