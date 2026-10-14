@@ -75,13 +75,13 @@ async def subscription_payment_callback(
     # NOWPayments menu is separate from the existing IDR/QRIS flow.
     if data == "nowpayments_menu":
         keyboard = [
-            [InlineKeyboardButton("🗓️ Weekly — 6 USDT", callback_data="nowpayments_plan_weekly")],
-            [InlineKeyboardButton("📅 Monthly — 24 USDT", callback_data="nowpayments_plan_monthly")],
-            [InlineKeyboardButton("📆 3 Bulan — 72 USD", callback_data="nowpayments_plan_quarterly")],
+            [InlineKeyboardButton("🗓️ Weekly — $6", callback_data="nowpayments_plan_weekly")],
+            [InlineKeyboardButton("📅 Monthly — $24", callback_data="nowpayments_plan_monthly")],
+            [InlineKeyboardButton("📆 3 Bulan — $72", callback_data="nowpayments_plan_quarterly")],
         ]
         await query.edit_message_text(
             "💠 *Pembayaran Crypto*\n\n"
-            "Pilih paket. Harga invoice menggunakan USD sebagai acuan; jumlah koin final ditentukan NOWPayments saat invoice dibuat.\n"
+            "Pilih paket, lalu tentukan aset tujuan dan aset yang akan dikirim.\n"
             "*Harga crypto dapat berbeda dari harga QRIS.*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -95,39 +95,149 @@ async def subscription_payment_callback(
     }
     selected_crypto_plan = nowpayments_plans.get(data)
     if selected_crypto_plan is not None:
-        await query.edit_message_text("⏳ Membuat invoice checkout NOWPayments...")
+        await query.edit_message_text("⏳ Memeriksa jaringan tujuan yang didukung NOWPayments...")
+        try:
+            from app.services.nowpayments_subscription import (
+                NOWPAYMENTS_PLAN_PRICES_USD,
+                NOWPaymentsSubscriptionService,
+            )
+            crypto_service = NOWPaymentsSubscriptionService(session)
+            targets = await crypto_service.get_available_outcome_currencies()
+        except Exception:
+            await query.edit_message_text("❌ Tidak dapat memeriksa jaringan NOWPayments saat ini. Coba lagi nanti.")
+            return
+        if not targets:
+            await query.edit_message_text("⚠️ Belum ada wallet tujuan yang dikonfigurasi. Tambahkan alamat wallet yang Anda kontrol ke NOWPAYMENTS_PAYOUT_ADDRESSES di .env, lalu restart bot.")
+            return
+        keyboard = []
+        for i in range(0, len(targets), 2):
+            pair = targets[i:i + 2]
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"🔹 {item['label']}",
+                    callback_data=f"np:target:{selected_crypto_plan.value}:{item['code']}",
+                )
+                for item in pair
+            ])
+        keyboard.append([InlineKeyboardButton("🔙 Kembali ke Paket", callback_data="nowpayments_menu")])
+        await query.edit_message_text(
+            "⚙️ *Pilih Jaringan / Aset Tujuan Transfer*\n\n"
+            f"📦 *Paket Dipilih:* {selected_crypto_plan.value.title()} "
+            f"(${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
+            "Silakan pilih aset atau stablecoin yang ingin Anda terima. "
+            "Pilihan hanya ditampilkan jika kodenya tersedia di NOWPayments.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("np:target:"):
+        parts = data.split(":")
+        if len(parts) != 4:
+            await query.edit_message_text("⚠️ Pilihan tujuan tidak valid. Gunakan /subscription untuk mulai lagi.")
+            return
+        _, _, plan_value, target_currency = parts
+        try:
+            selected_crypto_plan = SubscriptionPlan(plan_value)
+            from app.services.nowpayments import SUPPORTED_OUTCOME_CURRENCIES
+            target_label = SUPPORTED_OUTCOME_CURRENCIES[target_currency]
+            from app.services.nowpayments_subscription import (
+                NOWPAYMENTS_PLAN_PRICES_USD,
+                NOWPaymentsSubscriptionService,
+            )
+            crypto_service = NOWPaymentsSubscriptionService(session)
+            currencies = await crypto_service.get_available_payment_currencies(
+                plan=selected_crypto_plan, outcome_currency=target_currency
+            )
+        except Exception:
+            await query.edit_message_text("❌ Tidak dapat memeriksa pasangan mata uang ini. Silakan pilih tujuan lain.")
+            return
+        if not currencies:
+            await query.edit_message_text(
+                f"⚠️ Belum ada aset pembayaran dengan minimum sekitar $2 untuk tujuan {target_label}.\n\n"
+                "Silakan kembali dan pilih jaringan tujuan lain.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")]]),
+            )
+            return
+        keyboard = []
+        for item in currencies:
+            prefix = "🌟" if item.get("recommended") else "🔸"
+            suffix = " (Rekomendasi)" if item.get("recommended") else ""
+            keyboard.append([InlineKeyboardButton(
+                f"{prefix} {item['label']} → {target_label} — Fee ~${item['minimum_usd']:.2f}{suffix}",
+                callback_data=f"np:pay:{selected_crypto_plan.value}:{target_currency}:{item['code']}",
+            )])
+        keyboard.append([InlineKeyboardButton("🔙 Kembali ke Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")])
+        await query.edit_message_text(
+            "💳 *Pilih Aset Pembayaran Anda*\n\n"
+            "*Detail Transaksi:*\n"
+            f"• Paket: {selected_crypto_plan.value.title()} (${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
+            f"• Aset Tujuan: {target_label}\n\n"
+            "Pilih aset yang ingin Anda kirim. Minimum dan kurs dihitung secara live oleh NowPayments dan dapat berubah.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("np:pay:"):
+        parts = data.split(":")
+        if len(parts) != 5:
+            await query.edit_message_text("⚠️ Pilihan pasangan pembayaran tidak valid. Silakan mulai lagi.")
+            return
+        _, _, plan_value, target_currency, pay_currency = parts
+        try:
+            selected_crypto_plan = SubscriptionPlan(plan_value)
+        except ValueError:
+            await query.edit_message_text("⚠️ Paket tidak valid. Silakan mulai lagi.")
+            return
+        await query.edit_message_text("⏳ Memeriksa minimum terakhir dan membuat pembayaran...")
         try:
             from app.services.nowpayments_subscription import NOWPaymentsSubscriptionService
             crypto_service = NOWPaymentsSubscriptionService(session)
-            payment, checkout_url = await crypto_service.create_invoice(
+            payment, provider_payment = await crypto_service.create_payment(
                 user_id=user.id,
                 plan=selected_crypto_plan,
+                pay_currency=pay_currency,
+                outcome_currency=target_currency,
             )
             await session.commit()
-        except Exception:
+        except Exception as exc:
             await session.rollback()
+            # The provider client limits this message to a short, safe API error
+            # detail. Never include request headers or credentials here.
+            error_detail = str(exc).strip()[:300] or exc.__class__.__name__
             await query.edit_message_text(
-                "❌ Invoice belum dapat dibuat. Periksa konfigurasi NOWPayments dan coba lagi."
+                "❌ Pembayaran belum dapat dibuat.\n\n"
+                f"Detail: {error_detail}\n\n"
+                "Silakan kembali dan pilih aset lain atau kirim detail ini untuk diperiksa.",
             )
             return
-
-        if not checkout_url.startswith("https://"):
-            await query.edit_message_text("❌ NOWPayments tidak mengembalikan link checkout HTTPS yang valid.")
+        pay_amount = provider_payment.get("pay_amount")
+        pay_address = str(provider_payment.get("pay_address") or "")
+        pay_currency_label = str(provider_payment.get("pay_currency") or pay_currency).upper()
+        target_label = str(provider_payment.get("payout_currency") or target_currency).upper()
+        extra_id = provider_payment.get("payin_extra_id")
+        if not pay_address or not pay_amount:
+            await query.edit_message_text("❌ NOWPayments tidak mengembalikan detail pembayaran yang lengkap.")
             return
-
-        keyboard = [[InlineKeyboardButton("💳 Bayar Sekarang", url=checkout_url)]]
-        await query.edit_message_text(
-            "💠 *INVOICE PEMBAYARAN CRYPTO*\n\n"
-            + "📦 *Paket:* " + selected_crypto_plan.value.title() + "\n"
-            + "💵 *Harga acuan:* " + str(payment.price_amount) + " USD (mendekati harga USDT)\n"
-            + "🆔 *Order ID:* `" + payment.order_id + "`\n"
-            + "⏳ *Status:* Menunggu pembayaran\n\n"
-            + "Tekan tombol di bawah untuk membuka checkout resmi NOWPayments. Pilih aset dan jaringan yang tersedia di halaman checkout. "
-            + "Subscription hanya aktif setelah pembayaran diverifikasi oleh server.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            disable_web_page_preview=True,
+        details = (
+            "💠 *PEMBAYARAN CRYPTO*\n\n"
+            f"📦 *Paket:* {selected_crypto_plan.value.title()}\n"
+            f"💵 *Harga paket:* ${payment.price_amount} USD\n"
+            f"🪙 *Aset yang dikirim:* {pay_currency_label}\n"
+            f"🎯 *Aset tujuan:* {target_label}\n"
+            f"💰 *Jumlah yang harus dikirim:* `{pay_amount} {pay_currency_label}`\n"
+            f"📬 *Alamat deposit:* `{pay_address}`\n"
+            f"🆔 *Order ID:* `{payment.order_id}`\n"
+            "⏳ *Status:* Menunggu pembayaran\n\n"
         )
+        if extra_id:
+            details += f"🏷️ *Memo/Tag wajib:* `{extra_id}`\n\n"
+        details += (
+            "Kirim jumlah tepat ke alamat tersebut melalui jaringan yang dipilih. Jangan kirim dari jaringan lain. "
+            "Subscription aktif otomatis setelah NOWPayments mengonfirmasi pembayaran selesai."
+        )
+        await query.edit_message_text(details, parse_mode="Markdown")
         return
     plans = {
         "subscription_buy_weekly": SubscriptionPlan.WEEKLY,

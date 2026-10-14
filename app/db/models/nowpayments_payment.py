@@ -49,6 +49,7 @@ class NOWPaymentsPayment(Base):
         default="usd",
     )
     pay_currency: Mapped[str] = mapped_column(String(32), nullable=False)
+    outcome_currency: Mapped[str] = mapped_column(String(32), nullable=False, default="usdcbase")
 
     provider_payment_id: Mapped[str | None] = mapped_column(
         String(100),
