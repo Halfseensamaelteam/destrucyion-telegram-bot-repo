@@ -2,8 +2,8 @@
 NOWPayments subscription payment orchestration.
 
 This service is separate from PaymentService to preserve existing Midtrans
-QRIS behavior. Customers select a pay-in asset; NOWPayments routes settlement
-to the merchant's configured USDC Base outcome wallet.
+QRIS behavior. Customers select a pay-in asset and an explicitly configured
+payout currency/address.
 """
 
 from decimal import Decimal
