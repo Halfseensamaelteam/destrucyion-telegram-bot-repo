@@ -26,7 +26,7 @@ NOWPAYMENTS_PLAN_PRICES_USD: dict[SubscriptionPlan, Decimal] = {
 
 
 class NOWPaymentsSubscriptionService:
-    """Create and persist a hosted NOWPayments invoice."""
+    """Create and persist NOWPayments subscription payment attempts."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
