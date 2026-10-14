@@ -220,7 +220,8 @@ class Settings(BaseSettings):
     nowpayments_ipn_callback_url: str = Field(
         default="",
         description="Public HTTPS URL for the NOWPayments IPN callback endpoint.",
-    )    nowpayments_payout_addresses: str = Field(
+    )
+    nowpayments_payout_addresses: str = Field(
         default="",
         description=(
             "Comma-separated NOWPayments payout destinations as code=address pairs, "
