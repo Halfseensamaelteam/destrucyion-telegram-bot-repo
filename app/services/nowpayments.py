@@ -20,11 +20,21 @@ import httpx
 from app.core.config import get_settings
 
 
+# Exclude XRP/XLM because those networks can require a destination tag/memo.
+# The live menu is filtered against the merchant USDC Base outcome wallet.
 SUPPORTED_PAYMENT_CURRENCIES: dict[str, str] = {
-    "usdcbase": "USDC on Base",
-    "ethbase": "ETH on Base",
-    "trx": "TRX on TRON",
+    "trx": "TRX (TRON)",
+    "ltc": "Litecoin (LTC)",
+    "bch": "Bitcoin Cash (BCH)",
+    "dash": "Dash (DASH)",
+    "tusd": "TrueUSD (TUSD)",
+    "usdcbase": "USDC (Base)",
+    "ethbase": "ETH (Base)",
+    "sol": "Solana (SOL)",
+    "matic": "Polygon (MATIC)",
 }
+
+OUTCOME_CURRENCY = "usdcbase"
 
 
 class NOWPaymentsError(RuntimeError):
@@ -98,6 +108,72 @@ class NOWPaymentsService:
             raise NOWPaymentsError("NOWPayments returned an unexpected response.")
         return result
 
+    async def get_minimum_payment_amount(
+        self,
+        *,
+        pay_currency: str,
+        outcome_currency: str = OUTCOME_CURRENCY,
+    ) -> dict[str, Any]:
+        """Return the live minimum for a pay-in asset settling to USDC on Base."""
+        normalized_currency = pay_currency.strip().lower()
+        if normalized_currency not in SUPPORTED_PAYMENT_CURRENCIES:
+            raise ValueError("Unsupported NOWPayments payment currency.")
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                response = await client.get(
+                    f"{self._base_url}/min-amount",
+                    headers=self._headers(),
+                    params={
+                        "currency_from": normalized_currency,
+                        "currency_to": outcome_currency,
+                        "fiat_equivalent": "usd",
+                    },
+                )
+        except httpx.HTTPError as exc:
+            raise NOWPaymentsError("Could not check the current NOWPayments minimum. Please retry.") from exc
+        if response.is_error:
+            raise NOWPaymentsError(f"NOWPayments minimum check returned HTTP {response.status_code}.")
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise NOWPaymentsError("NOWPayments returned an invalid minimum-amount response.") from exc
+        if not isinstance(result, dict):
+            raise NOWPaymentsError("NOWPayments returned an incomplete minimum amount.")
+        try:
+            minimum_amount = Decimal(str(result["min_amount"]))
+            fiat_equivalent = Decimal(str(result["fiat_equivalent"]))
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise NOWPaymentsError("NOWPayments returned invalid minimum-amount values.") from exc
+        if not minimum_amount.is_finite() or minimum_amount <= 0 or not fiat_equivalent.is_finite() or fiat_equivalent <= 0:
+            raise NOWPaymentsError("NOWPayments returned invalid minimum-amount values.")
+        return {
+            "currency_from": normalized_currency,
+            "currency_to": outcome_currency,
+            "min_amount": minimum_amount,
+            "fiat_equivalent_usd": fiat_equivalent,
+        }
+
+    async def get_available_payment_currencies(
+        self, *, price_usd: Decimal, max_minimum_usd: Decimal = Decimal("2.00")
+    ) -> list[dict[str, Any]]:
+        """List assets whose live pair minimum is no more than $2."""
+        if price_usd <= 0:
+            raise ValueError("price_usd must be greater than zero.")
+        available: list[dict[str, Any]] = []
+        for code, label in SUPPORTED_PAYMENT_CURRENCIES.items():
+            try:
+                minimum = await self.get_minimum_payment_amount(pay_currency=code)
+            except NOWPaymentsError:
+                # Never offer a pair whose minimum could not be verified.
+                continue
+            minimum_usd = minimum["fiat_equivalent_usd"]
+            if minimum_usd <= max_minimum_usd and price_usd >= minimum_usd:
+                available.append({
+                    "code": code, "label": label,
+                    "minimum_amount": minimum["min_amount"],
+                    "minimum_usd": minimum_usd,
+                })
+        return available
     async def create_invoice(
         self,
         *,
