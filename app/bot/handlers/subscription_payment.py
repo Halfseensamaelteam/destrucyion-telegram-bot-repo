@@ -123,9 +123,9 @@ async def subscription_payment_callback(
         ]
         keyboard.append([InlineKeyboardButton("⬅️ Kembali", callback_data="nowpayments_menu")])
         await query.edit_message_text(
-            f"💠 *Pilih aset/jaringan pembayaran*\\n\\n"
+            f"💠 *Pilih aset/jaringan pembayaran*\n\n"
             f"📦 Paket: *{selected_crypto_plan.value.title()}* "
-            f"({NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\\n"
+            f"({NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
             "Minimum yang ditampilkan adalah perkiraan live untuk pembayaran ke wallet USDC Base. "
             "Minimum dan kurs dapat berubah sebelum pembayaran dibuat.",
             parse_mode="Markdown",
@@ -168,17 +168,17 @@ async def subscription_payment_callback(
             await query.edit_message_text("❌ NOWPayments tidak mengembalikan detail pembayaran yang lengkap.")
             return
         details = (
-            "💠 *PEMBAYARAN CRYPTO*\\n\\n"
-            f"📦 *Paket:* {selected_crypto_plan.value.title()}\\n"
-            f"💵 *Harga paket:* {payment.price_amount} USD\\n"
-            f"🪙 *Aset/jaringan:* {pay_currency_label}\\n"
-            f"💰 *Jumlah yang harus dikirim:* `{pay_amount} {pay_currency_label}`\\n"
-            f"📬 *Alamat deposit:* `{pay_address}`\\n"
-            f"🆔 *Order ID:* `{payment.order_id}`\\n"
-            "⏳ *Status:* Menunggu pembayaran\\n\\n"
+            "💠 *PEMBAYARAN CRYPTO*\n\n"
+            f"📦 *Paket:* {selected_crypto_plan.value.title()}\n"
+            f"💵 *Harga paket:* {payment.price_amount} USD\n"
+            f"🪙 *Aset/jaringan:* {pay_currency_label}\n"
+            f"💰 *Jumlah yang harus dikirim:* `{pay_amount} {pay_currency_label}`\n"
+            f"📬 *Alamat deposit:* `{pay_address}`\n"
+            f"🆔 *Order ID:* `{payment.order_id}`\n"
+            "⏳ *Status:* Menunggu pembayaran\n\n"
         )
         if extra_id:
-            details += f"🏷️ *Memo/Tag wajib:* `{extra_id}`\\n\\n"
+            details += f"🏷️ *Memo/Tag wajib:* `{extra_id}`\n\n"
         details += (
             "Kirim jumlah yang tepat ke alamat di atas melalui jaringan yang dipilih. "
             "Jangan kirim aset dari jaringan lain. Subscription aktif otomatis setelah "
