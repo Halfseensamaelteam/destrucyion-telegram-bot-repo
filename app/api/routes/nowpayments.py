@@ -90,6 +90,11 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
             raise HTTPException(status_code=400, detail="Missing payment currency.")
         if payment.pay_currency.lower() not in {"checkout", pay_currency}:
             raise HTTPException(status_code=400, detail="Payment currency does not match this order.")
+        notified_outcome_currency = str(
+            payload.get("payout_currency") or payload.get("outcome_currency") or ""
+        ).strip().lower()
+        if notified_outcome_currency and notified_outcome_currency != payment.outcome_currency.lower():
+            raise HTTPException(status_code=400, detail="Payout currency does not match this order.")
 
         if payload.get("pay_amount") is not None and payment.pay_amount is not None:
             try:
