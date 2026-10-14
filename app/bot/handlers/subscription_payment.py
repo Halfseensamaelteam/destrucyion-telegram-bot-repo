@@ -81,7 +81,7 @@ async def subscription_payment_callback(
         ]
         await query.edit_message_text(
             "💠 *Pembayaran Crypto*\n\n"
-            "Pilih paket. Setelah itu pilih aset dan jaringan yang memenuhi minimum live sekitar $2 untuk wallet USDC Base.\n"
+            "Pilih paket, lalu tentukan aset tujuan (`currency_to`) dan aset yang akan dikirim (`currency_from`).\n"
             "*Harga crypto dapat berbeda dari harga QRIS.*",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
