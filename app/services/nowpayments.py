@@ -281,7 +281,7 @@ class NOWPaymentsService:
         self, *, price_usd: Decimal, pay_currency: str,
         outcome_currency: str = OUTCOME_CURRENCY, order_id: str, description: str,
     ) -> dict[str, Any]:
-        """Create an invoice then bind the chosen pay-in and payout currencies."""
+        """Create a direct payment for a selected source and payout currency."""
         if price_usd <= 0:
             raise ValueError("price_usd must be greater than zero.")
         source = pay_currency.strip().lower()
@@ -295,23 +295,22 @@ class NOWPaymentsService:
             raise NOWPaymentsError("The selected payout currency has no configured wallet address.")
         if not self._ipn_callback_url.startswith("https://"):
             raise NOWPaymentsError("NOWPayments IPN callback must be a public HTTPS URL.")
-        invoice = await self.create_invoice(
-            price_usd=price_usd, order_id=order_id, description=description
-        )
         result = await self._post(
-            "/invoice-payment",
+            "/payment",
             {
-                "iid": invoice["id"],
+                "price_amount": float(price_usd),
+                "price_currency": "usd",
                 "pay_currency": source,
                 "payout_address": payout_address,
                 "payout_currency": target,
+                "ipn_callback_url": self._ipn_callback_url,
+                "order_id": order_id,
                 "order_description": description[:255],
             },
         )
-        result.setdefault("invoice_id", str(invoice["id"]))
         required = ("payment_id", "pay_address", "pay_amount", "pay_currency")
         if any(result.get(field) in (None, "") for field in required):
-            raise NOWPaymentsError("NOWPayments invoice-payment response is missing required payment details.")
+            raise NOWPaymentsError("NOWPayments payment response is missing required payment details.")
         result.setdefault("payout_currency", target)
         return result
     @staticmethod
