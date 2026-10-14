@@ -24,6 +24,7 @@ from app.core.config import get_settings
 # The live menu is filtered against the merchant USDC Base outcome wallet.
 SUPPORTED_PAYMENT_CURRENCIES: dict[str, str] = {
     "trx": "TRX (TRON)",
+    "usdttrc20": "USDT (TRON / TRC20)",
     "ltc": "Litecoin (LTC)",
     "bch": "Bitcoin Cash (BCH)",
     "dash": "Dash (DASH)",
