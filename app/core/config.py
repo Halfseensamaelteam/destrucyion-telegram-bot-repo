@@ -172,6 +172,18 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Payment method availability
+    # ------------------------------------------------------------------
+    enable_qris: bool = Field(
+        default=True,
+        description="Show QRIS as a subscription payment method in the Telegram bot.",
+    )
+    enable_nowpayments: bool = Field(
+        default=True,
+        description="Show NOWPayments crypto as a subscription payment method in the Telegram bot.",
+    )
+
+    # ------------------------------------------------------------------
     # Midtrans Payment Gateway
     # ------------------------------------------------------------------
     midtrans_client_key: str = Field(

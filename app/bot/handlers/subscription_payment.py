@@ -38,15 +38,48 @@ async def subscription_payment_callback(
     data = query.data or ""
     settings = get_settings()
 
-    if data == "subscription_add_plan":
-        keyboard = [
-            [InlineKeyboardButton("🇮🇩 QRIS (Rupiah)", callback_data="subscription_qris_menu")],
-            [InlineKeyboardButton("💠 Crypto Payment (NOWPayments)", callback_data="nowpayments_menu")],
-        ]
+    # Hide methods in the menu and reject stale callback buttons if a provider
+    # has been disabled in .env while a user still has an old message open.
+    qris_actions = {
+        "subscription_qris_menu",
+        "subscription_buy_weekly",
+        "subscription_buy_monthly",
+        "subscription_buy_quarterly",
+    }
+    is_crypto_action = (
+        data == "nowpayments_menu"
+        or data.startswith("nowpayments_plan_")
+        or data.startswith("np:target:")
+        or data.startswith("np:pay:")
+    )
+    if data in qris_actions and not settings.enable_qris:
         await query.edit_message_text(
-            "➕ *Tambahkan Plan*\n\nPilih metode pembayaran:",
+            "⚠️ Pembayaran QRIS sedang dinonaktifkan sementara. Silakan pilih metode lain atau coba lagi nanti."
+        )
+        return
+    if is_crypto_action and not settings.enable_nowpayments:
+        await query.edit_message_text(
+            "⚠️ Pembayaran Crypto sedang dinonaktifkan sementara. Silakan pilih metode lain atau coba lagi nanti."
+        )
+        return
+
+    if data == "subscription_add_plan":
+        keyboard = []
+        if settings.enable_qris:
+            keyboard.append([
+                InlineKeyboardButton("🇮🇩 QRIS (Rupiah)", callback_data="subscription_qris_menu")
+            ])
+        if settings.enable_nowpayments:
+            keyboard.append([
+                InlineKeyboardButton("💠 Crypto Payment (NOWPayments)", callback_data="nowpayments_menu")
+            ])
+        message = "➕ *Tambahkan Plan*\n\nPilih metode pembayaran:"
+        if not keyboard:
+            message = "⚠️ Saat ini pembayaran sedang tidak tersedia. Silakan coba lagi nanti."
+        await query.edit_message_text(
+            message,
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
         )
         return
 

@@ -41,26 +41,33 @@ async def subscription_command(
             "Pilih metode pembayaran:"
         )
 
-        keyboard = [
-            [
+        keyboard = []
+        if settings.enable_qris:
+            keyboard.append([
                 InlineKeyboardButton(
                     "🇮🇩 QRIS (Rupiah)",
                     callback_data="subscription_qris_menu",
                 )
-            ],
-            [
+            ])
+        if settings.enable_nowpayments:
+            keyboard.append([
                 InlineKeyboardButton(
                     "💠 Crypto Payment (NOWPayments)",
                     callback_data="nowpayments_menu",
                 )
-            ],
-        ]
+            ])
+
+        if not keyboard:
+            text = (
+                "⭐ *Status Langganan*\n\n"
+                "⚠️ Saat ini pembayaran sedang tidak tersedia. Silakan coba lagi nanti."
+            )
 
         if update.message:
             await update.message.reply_text(
                 text,
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup(keyboard),
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
             )
 
         return
