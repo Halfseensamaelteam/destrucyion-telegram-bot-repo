@@ -19,6 +19,9 @@ async def channel_membership_gate(update: Update, context: ContextTypes.DEFAULT_
     user = update.effective_user
     if user is None or user.is_bot:
         return
+    # The explicit re-check button must reach its dedicated handler.
+    if update.callback_query and update.callback_query.data == "check_channel_membership":
+        return
     try:
         member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
         joined = member.status in ("member", "administrator", "creator") or (
