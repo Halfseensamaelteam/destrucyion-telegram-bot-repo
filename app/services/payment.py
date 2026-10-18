@@ -55,7 +55,7 @@ class PaymentService:
         user_id: int,
         plan: SubscriptionPlan,
         bank: str,
-    ) -> Payment:
+    ) -> tuple[Payment, dict]:
         """Create a Midtrans bank payment and save its pending record."""
         transaction = self.midtrans.create_bank_transfer_transaction(
             user_id=user_id,
@@ -73,7 +73,7 @@ class PaymentService:
             qr_string=None,
             expiry_time=transaction["expiry_time"],
         )
-        return payment
+        return payment, transaction
 
     async def process_notification(
         self,
