@@ -4,7 +4,9 @@ app.bot.bot
 Telegram Bot application factory using python-telegram-bot.
 """
 
+from telegram import Update
 from telegram.ext import (
+    TypeHandler,
     Application,
     CommandHandler,
     ConversationHandler,
@@ -34,6 +36,7 @@ from app.bot.handlers.subscription import subscription_command
 from app.bot.handlers.subscription_payment import subscription_payment_callback
 from app.bot.handlers.admin import admin_command
 from app.bot.handlers.phone_login import connect_phone_command
+from app.bot.handlers.channel_gate import channel_membership_gate, check_channel_membership
 
 
 def create_bot_app() -> Application:
@@ -57,6 +60,10 @@ def create_bot_app() -> Application:
         .persistence(persistence)
         .build()
     )
+
+    # Membership checks run before all application commands and callbacks.
+    application.add_handler(CallbackQueryHandler(check_channel_membership, pattern="^check_channel_membership$"), group=-3)
+    application.add_handler(TypeHandler(Update, channel_membership_gate), group=-2)
 
     # Basic Commands
     application.add_handler(CommandHandler("start", start_command))

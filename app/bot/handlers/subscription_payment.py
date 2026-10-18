@@ -54,12 +54,14 @@ async def subscription_payment_callback(
     )
     if data in qris_actions and not settings.enable_qris:
         await query.edit_message_text(
-            "⚠️ Pembayaran QRIS sedang dinonaktifkan sementara. Silakan pilih metode lain atau coba lagi nanti."
+            "⚠️ QRIS payment is temporarily disabled.\n\n"
+            "🔄 Please try another payment method or check back later!"
         )
         return
     if is_crypto_action and not settings.enable_nowpayments:
         await query.edit_message_text(
-            "⚠️ Pembayaran Crypto sedang dinonaktifkan sementara. Silakan pilih metode lain atau coba lagi nanti."
+            "⚠️ Crypto payment is temporarily disabled.\n\n"
+            "🔄 Please try another payment method or check back later!"
         )
         return
 
@@ -67,15 +69,15 @@ async def subscription_payment_callback(
         keyboard = []
         if settings.enable_qris:
             keyboard.append([
-                InlineKeyboardButton("🇮🇩 QRIS (Rupiah)", callback_data="subscription_qris_menu")
+                InlineKeyboardButton("🇮🇩 QRIS (Indonesia Payments)", callback_data="subscription_qris_menu")
             ])
         if settings.enable_nowpayments:
             keyboard.append([
-                InlineKeyboardButton("💠 Crypto Payment (NOWPayments)", callback_data="nowpayments_menu")
+                InlineKeyboardButton("💠 Crypto (International)", callback_data="nowpayments_menu")
             ])
-        message = "➕ *Tambahkan Plan*\n\nPilih metode pembayaran:"
+        message = "➕ *Add Plan*\n\n💳 Choose your preferred payment method:"
         if not keyboard:
-            message = "⚠️ Saat ini pembayaran sedang tidak tersedia. Silakan coba lagi nanti."
+            message = "⚠️ Payments are currently unavailable.\n\n🔄 Please try again later!"
         await query.edit_message_text(
             message,
             parse_mode="Markdown",
@@ -94,12 +96,14 @@ async def subscription_payment_callback(
                 callback_data="subscription_buy_monthly",
             )],
             [InlineKeyboardButton(
-                f"📆 3 Bulan — {_format_idr(settings.subscription_3_monthly_price)}",
+                f"📆 3 Months — {_format_idr(settings.subscription_3_monthly_price)}",
                 callback_data="subscription_buy_quarterly",
             )],
         ]
         await query.edit_message_text(
-            "🇮🇩 *Pembayaran QRIS*\n\nPilih plan yang ingin dibeli:",
+            "🇮🇩 *QRIS Payment*\n\n"
+            "💎 Select the plan that suits you best:\n\n"
+            "✨ Instant activation after payment!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -110,12 +114,13 @@ async def subscription_payment_callback(
         keyboard = [
             [InlineKeyboardButton("🗓️ Weekly — $6", callback_data="nowpayments_plan_weekly")],
             [InlineKeyboardButton("📅 Monthly — $24", callback_data="nowpayments_plan_monthly")],
-            [InlineKeyboardButton("📆 3 Bulan — $72", callback_data="nowpayments_plan_quarterly")],
+            [InlineKeyboardButton("📆 3 Months — $72", callback_data="nowpayments_plan_quarterly")],
         ]
         await query.edit_message_text(
-            "💠 *Pembayaran Crypto*\n\n"
-            "Pilih paket, lalu tentukan aset tujuan dan aset yang akan dikirim.\n"
-            "*Harga crypto dapat berbeda dari harga QRIS.*",
+            "💠 *Crypto Payment*\n\n"
+            "🚀 Select a plan, then choose your crypto!\n\n"
+            "💡 *Note:* Crypto prices may differ from QRIS prices.\n"
+            "✨ Instant activation after confirmation!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -128,7 +133,7 @@ async def subscription_payment_callback(
     }
     selected_crypto_plan = nowpayments_plans.get(data)
     if selected_crypto_plan is not None:
-        await query.edit_message_text("⏳ Memeriksa jaringan tujuan yang didukung NOWPayments...")
+        await query.edit_message_text("⏳ Checking supported networks...")
         try:
             from app.services.nowpayments_subscription import (
                 NOWPAYMENTS_PLAN_PRICES_USD,
@@ -137,10 +142,13 @@ async def subscription_payment_callback(
             crypto_service = NOWPaymentsSubscriptionService(session)
             targets = await crypto_service.get_available_outcome_currencies()
         except Exception:
-            await query.edit_message_text("❌ Tidak dapat memeriksa jaringan NOWPayments saat ini. Coba lagi nanti.")
+            await query.edit_message_text("❌ Cannot check networks at this time.\n\n🔄 Please try again later!")
             return
         if not targets:
-            await query.edit_message_text("⚠️ Belum ada wallet tujuan yang dikonfigurasi. Tambahkan alamat wallet yang Anda kontrol ke NOWPAYMENTS_PAYOUT_ADDRESSES di .env, lalu restart bot.")
+            await query.edit_message_text(
+                "⚠️ No destination wallet configured yet.\n\n"
+                "🔧 Please contact support to set up payout addresses."
+            )
             return
         keyboard = []
         for i in range(0, len(targets), 2):
@@ -152,13 +160,13 @@ async def subscription_payment_callback(
                 )
                 for item in pair
             ])
-        keyboard.append([InlineKeyboardButton("🔙 Kembali ke Paket", callback_data="nowpayments_menu")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Plans", callback_data="nowpayments_menu")])
         await query.edit_message_text(
-            "⚙️ *Pilih Jaringan / Aset Tujuan Transfer*\n\n"
-            f"📦 *Paket Dipilih:* {selected_crypto_plan.value.title()} "
-            f"(${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
-            "Silakan pilih aset atau stablecoin yang ingin Anda terima. "
-            "Pilihan hanya ditampilkan jika kodenya tersedia di NOWPayments.",
+            "⚙️ *Select Destination Network*\n\n"
+            f"📦 *Selected Plan:* {selected_crypto_plan.value.title()} "
+            f"(${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n\n"
+            "💰 Choose the asset you want to receive:\n"
+            "✨ Options shown are available on NOWPayments.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -167,7 +175,7 @@ async def subscription_payment_callback(
     if data.startswith("np:target:"):
         parts = data.split(":")
         if len(parts) != 4:
-            await query.edit_message_text("⚠️ Pilihan tujuan tidak valid. Gunakan /subscription untuk mulai lagi.")
+            await query.edit_message_text("⚠️ Invalid selection.\n\n🔄 Use /subscription to start over.")
             return
         _, _, plan_value, target_currency = parts
         try:
@@ -183,30 +191,31 @@ async def subscription_payment_callback(
                 plan=selected_crypto_plan, outcome_currency=target_currency
             )
         except Exception:
-            await query.edit_message_text("❌ Tidak dapat memeriksa pasangan mata uang ini. Silakan pilih tujuan lain.")
+            await query.edit_message_text("❌ Cannot check this pair.\n\n🔄 Please choose another destination.")
             return
         if not currencies:
             await query.edit_message_text(
-                f"⚠️ Belum ada aset pembayaran dengan minimum sekitar $2 untuk tujuan {target_label}.\n\n"
-                "Silakan kembali dan pilih jaringan tujuan lain.",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Kembali ke Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")]]),
+                f"⚠️ No payment asset available for {target_label}.\n\n"
+                "🔄 Please select another destination network.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")]]),
             )
             return
         keyboard = []
         for item in currencies:
             prefix = "🌟" if item.get("recommended") else "🔸"
-            suffix = " (Rekomendasi)" if item.get("recommended") else ""
+            suffix = " (Recommended)" if item.get("recommended") else ""
             keyboard.append([InlineKeyboardButton(
                 f"{prefix} {item['label']} → {target_label} — Fee ~${item['minimum_usd']:.2f}{suffix}",
                 callback_data=f"np:pay:{selected_crypto_plan.value}:{target_currency}:{item['code']}",
             )])
-        keyboard.append([InlineKeyboardButton("🔙 Kembali ke Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")])
+        keyboard.append([InlineKeyboardButton("🔙 Back to Chain", callback_data=f"nowpayments_plan_{selected_crypto_plan.value}")])
         await query.edit_message_text(
-            "💳 *Pilih Aset Pembayaran Anda*\n\n"
-            "*Detail Transaksi:*\n"
-            f"• Paket: {selected_crypto_plan.value.title()} (${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
-            f"• Aset Tujuan: {target_label}\n\n"
-            "Pilih aset yang ingin Anda kirim. Minimum dan kurs dihitung secara live oleh NowPayments dan dapat berubah.",
+            "💳 *Select Payment Asset*\n\n"
+            "📋 *Transaction Details:*\n"
+            f"📦 Plan: {selected_crypto_plan.value.title()} (${NOWPAYMENTS_PLAN_PRICES_USD[selected_crypto_plan]} USD)\n"
+            f"🎯 Destination: {target_label}\n\n"
+            "💰 Choose the asset you want to send.\n"
+            "📊 Rates calculated live by NowPayments.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -215,15 +224,15 @@ async def subscription_payment_callback(
     if data.startswith("np:pay:"):
         parts = data.split(":")
         if len(parts) != 5:
-            await query.edit_message_text("⚠️ Pilihan pasangan pembayaran tidak valid. Silakan mulai lagi.")
+            await query.edit_message_text("⚠️ Invalid payment pair selection. Please start over.")
             return
         _, _, plan_value, target_currency, pay_currency = parts
         try:
             selected_crypto_plan = SubscriptionPlan(plan_value)
         except ValueError:
-            await query.edit_message_text("⚠️ Paket tidak valid. Silakan mulai lagi.")
+            await query.edit_message_text("⚠️ Invalid plan.\n\n🔄 Please start over.")
             return
-        await query.edit_message_text("⏳ Memeriksa minimum terakhir dan membuat pembayaran...")
+        await query.edit_message_text("⏳ Creating your payment...")
         try:
             from app.services.nowpayments_subscription import NOWPaymentsSubscriptionService
             crypto_service = NOWPaymentsSubscriptionService(session)
@@ -240,9 +249,9 @@ async def subscription_payment_callback(
             # detail. Never include request headers or credentials here.
             error_detail = str(exc).strip()[:300] or exc.__class__.__name__
             await query.edit_message_text(
-                "❌ Pembayaran belum dapat dibuat.\n\n"
-                f"Detail: {error_detail}\n\n"
-                "Silakan kembali dan pilih aset lain atau kirim detail ini untuk diperiksa.",
+                "❌ Payment could not be created.\n\n"
+                f"📋 Details: {error_detail}\n\n"
+                "🔄 Please try another asset or contact support.",
             )
             return
         pay_amount = provider_payment.get("pay_amount")
@@ -251,24 +260,25 @@ async def subscription_payment_callback(
         target_label = str(provider_payment.get("payout_currency") or target_currency).upper()
         extra_id = provider_payment.get("payin_extra_id")
         if not pay_address or not pay_amount:
-            await query.edit_message_text("❌ NOWPayments tidak mengembalikan detail pembayaran yang lengkap.")
+            await query.edit_message_text("❌ NOWPayments did not return complete payment details.")
             return
         details = (
-            "💠 *PEMBAYARAN CRYPTO*\n\n"
-            f"📦 *Paket:* {selected_crypto_plan.value.title()}\n"
-            f"💵 *Harga paket:* ${payment.price_amount} USD\n"
-            f"🪙 *Aset yang dikirim:* {pay_currency_label}\n"
-            f"🎯 *Aset tujuan:* {target_label}\n"
-            f"💰 *Jumlah yang harus dikirim:* `{pay_amount} {pay_currency_label}`\n"
-            f"📬 *Alamat deposit:* `{pay_address}`\n"
-            f"🆔 *Order ID:* `{payment.order_id}`\n"
-            "⏳ *Status:* Menunggu pembayaran\n\n"
+            "💠 *CRYPTO PAYMENT*\n\n"
+            f"📦 Plan: {selected_crypto_plan.value.title()}\n"
+            f"💵 Price: ${payment.price_amount} USD\n"
+            f"🪙 Send: {pay_currency_label}\n"
+            f"🎯 Receive: {target_label}\n"
+            f"💰 Amount: `{pay_amount} {pay_currency_label}`\n"
+            f"📬 Address: `{pay_address}`\n"
+            f"🆔 Order ID: `{payment.order_id}`\n"
+            "⏳ Status: ⏳ Waiting for payment\n\n"
         )
         if extra_id:
-            details += f"🏷️ *Memo/Tag wajib:* `{extra_id}`\n\n"
+            details += f"🏷️ Required Memo/Tag: `{extra_id}`\n\n"
         details += (
-            "Kirim jumlah tepat ke alamat tersebut melalui jaringan yang dipilih. Jangan kirim dari jaringan lain. "
-            "Subscription aktif otomatis setelah NOWPayments mengonfirmasi pembayaran selesai."
+            "⚠️ Send the EXACT amount to the address above.\n"
+            "🚫 Do NOT send from a different network.\n\n"
+            "✅ Subscription activates automatically after confirmation!"
         )
         await query.edit_message_text(details, parse_mode="Markdown")
         return
@@ -282,12 +292,12 @@ async def subscription_payment_callback(
 
     if plan is None:
         await query.edit_message_text(
-            "⚠️ Opsi langganan tidak valid. Silakan gunakan /subscription kembali."
+            "⚠️ Invalid option.\n\n🔄 Please use /subscription again."
         )
         return
 
     await query.edit_message_text(
-        "⏳ Memproses pembayaran QRIS Anda..."
+        "⏳ Processing your payment..."
     )
 
     payment_service = PaymentService(session)
@@ -303,13 +313,13 @@ async def subscription_payment_callback(
     except Exception as exc:
         await session.rollback()
         await query.edit_message_text(
-            f"❌ Gagal membuat pembayaran:\n{exc}"
+            f"❌ Failed to create payment.\n\n📋 {exc}\n\n🔄 Please try again."
         )
         return
 
     if not payment.qr_string:
         await query.message.reply_text(
-            "⚠️ Pembayaran dibuat, tetapi kode QRIS tidak ditemukan."
+            "⚠️ Payment created, but QRIS code not found.\n\n🔄 Please try again."
         )
         return
 
@@ -328,30 +338,31 @@ async def subscription_payment_callback(
             "%Y-%m-%d %H:%M:%S WIB"
         )
     else:
-        expiry_text = "Tidak disediakan oleh Midtrans"
+        expiry_text = "Not provided by Midtrans"
 
     caption = (
-        "💳 *TAGIHAN PEMBAYARAN*\n\n"
-        f"📦 *Plan:* {plan.value.title()}\n"
-        f"💰 *Jumlah:* {_format_idr(payment.amount)}\n"
-        f"🆔 *Order ID:* `{payment.order_id}`\n\n"
-        "⏳ *Status:* PENDING\n"
-        f"⏰ *Batas Waktu:* {expiry_text}\n\n"
+        "💳 *PAYMENT BILL*\n\n"
+        f"📦 Plan: {plan.value.title()}\n"
+        f"💰 Amount: {_format_idr(payment.amount)}\n"
+        f"🆔 Order ID: `{payment.order_id}`\n"
+        f"⏳ Status: ⏳ PENDING\n"
+        f"⏰ Deadline: {expiry_text}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━\n"
-        "📲 *CARA PEMBAYARAN*\n"
-        "Scan kode QRIS di atas menggunakan "
-        "aplikasi pembayaran atau e-wallet pilihan Anda.\n\n"
+        "📲 *HOW TO PAY*\n\n"
+        "📱 Scan the QRIS code above using\n"
+        "💳 your preferred payment app or e-wallet.\n\n"
+        "✨ Instant activation after payment!"
     )
 
     if qr_image_url:
         caption += (
-            "🖼️ *Link Gambar QR Code*\n"
+            "🖼️ QR Code Image Link:\n"
             f"{qr_image_url}\n\n"
         )
 
     caption += (
-        "⚠️ Harap selesaikan pembayaran sebelum "
-        "masa berlaku QRIS habis."
+        "⚠️ Complete payment before the QRIS expires!\n\n"
+        "🙏 Thank you for your purchase!"
     )
 
     await query.message.reply_photo(

@@ -35,32 +35,35 @@ async def subscription_command(
 
     if not subscription:
         text = (
-            "⭐ *Status Langganan*\n\n"
-            "Anda tidak memiliki langganan aktif.\n"
-            "Saat ini Anda berada pada paket *Free*.\n\n"
-            "Pilih metode pembayaran:"
+            "⭐ *Subscription Status*\n\n"
+            "🎉 Welcome! You're currently on the *Free* plan.\n\n"
+            "💎 Upgrade to unlock premium features:\n"
+            "✅ Unlimited media saving\n"
+            "✅ Faster processing\n"
+            "✅ Priority support\n\n"
+            "💳 Select a payment method to get started:"
         )
 
         keyboard = []
         if settings.enable_qris:
             keyboard.append([
                 InlineKeyboardButton(
-                    "🇮🇩 QRIS (Rupiah)",
+                    "🇮🇩 QRIS (Indonesia Payments)",
                     callback_data="subscription_qris_menu",
                 )
             ])
         if settings.enable_nowpayments:
             keyboard.append([
                 InlineKeyboardButton(
-                    "💠 Crypto Payment (NOWPayments)",
+                    "💠 Crypto Payment (International Payments)",
                     callback_data="nowpayments_menu",
                 )
             ])
 
         if not keyboard:
             text = (
-                "⭐ *Status Langganan*\n\n"
-                "⚠️ Saat ini pembayaran sedang tidak tersedia. Silakan coba lagi nanti."
+                "⭐ *Subscription Status*\n\n"
+                "⚠️ Payments are currently unavailable. Please try again later."
             )
 
         if update.message:
@@ -73,28 +76,29 @@ async def subscription_command(
         return
 
     if subscription.expires_at is None:
-        expires_line = "⏳ *Masa Berlaku:* Selamanya (Akses Lifetime)"
+        expires_line = "⏳ *Valid Until:* ♾️ Forever (Lifetime Access)"
     else:
         wib = timezone(timedelta(hours=7))
         expires_wib = subscription.expires_at.astimezone(wib)
 
         expires_line = (
-            f"⏳ *Masa Berlaku:* "
-            f"{expires_wib.strftime('%Y-%m-%d %H:%M WIB')}"
+            f"⏳ *Valid Until:* "
+            f"📅 {expires_wib.strftime('%Y-%m-%d %H:%M WIB')}"
         )
 
     text = (
-        "⭐ *Status Langganan*\n\n"
-        f"📦 *Paket:* {subscription.plan.value.title()}\n"
+        "⭐ *Subscription Status*\n\n"
+        f"📦 *Plan:* {subscription.plan.value.title()}\n"
         f"🟢 *Status:* {subscription.status.value.title()}\n"
         f"{expires_line}\n\n"
-        "Terima kasih telah menggunakan layanan kami!"
+        "🙏 Thank you for being a valued subscriber!\n"
+        "💪 Enjoy your premium benefits!"
     )
 
     keyboard = [
         [
             InlineKeyboardButton(
-                "➕ Tambahkan Plan",
+                "➕ Upgrade or Extend Plan",
                 callback_data="subscription_add_plan",
             )
         ]
