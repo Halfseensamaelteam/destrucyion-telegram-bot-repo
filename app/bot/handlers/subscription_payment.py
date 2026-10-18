@@ -45,7 +45,15 @@ async def subscription_payment_callback(
         "subscription_buy_weekly",
         "subscription_buy_monthly",
         "subscription_buy_quarterly",
+        "subscription_bank_menu",
     }
+    is_bank_action = data.startswith("subscription_bank_")
+    if is_bank_action and not settings.enable_qris:
+        await query.edit_message_text(
+            "⚠️ Indonesian bank payments are temporarily disabled.\\n\\n"
+            "🔄 Please try another payment method or check back later!"
+        )
+        return
     is_crypto_action = (
         data == "nowpayments_menu"
         or data.startswith("nowpayments_plan_")
@@ -70,6 +78,9 @@ async def subscription_payment_callback(
         if settings.enable_qris:
             keyboard.append([
                 InlineKeyboardButton("🇮🇩 QRIS (Indonesia Payments)", callback_data="subscription_qris_menu")
+            ])
+            keyboard.append([
+                InlineKeyboardButton("🏦 Bank Transfer (BRI / BNI / CIMB)", callback_data="subscription_bank_menu")
             ])
         if settings.enable_nowpayments:
             keyboard.append([
@@ -107,6 +118,117 @@ async def subscription_payment_callback(
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
+
+    if data == "subscription_bank_menu":
+        keyboard = [
+            [InlineKeyboardButton(
+                f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
+                callback_data="subscription_bank_plan_weekly",
+            )],
+            [InlineKeyboardButton(
+                f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
+                callback_data="subscription_bank_plan_monthly",
+            )],
+            [InlineKeyboardButton(
+                f"📆 3 Months — {_format_idr(settings.subscription_3_monthly_price)}",
+                callback_data="subscription_bank_plan_quarterly",
+            )],
+            [InlineKeyboardButton("🔙 Back", callback_data="subscription_add_plan")],
+        ]
+        await query.edit_message_text(
+            "🏦 *Bank Transfer*\\n\\n"
+            "💎 Select your subscription plan.\\n"
+            "Supported banks: BRI, BNI, and CIMB Niaga.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    bank_plan_callbacks = {
+        "subscription_bank_plan_weekly": SubscriptionPlan.WEEKLY,
+        "subscription_bank_plan_monthly": SubscriptionPlan.MONTHLY,
+        "subscription_bank_plan_quarterly": SubscriptionPlan.QUARTERLY,
+    }
+    selected_bank_plan = bank_plan_callbacks.get(data)
+    if selected_bank_plan is not None:
+        keyboard = [
+            [InlineKeyboardButton("🏦 BRI", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:bri")],
+            [InlineKeyboardButton("🏦 BNI", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:bni")],
+            [InlineKeyboardButton("🏦 CIMB Niaga", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:cimb")],
+            [InlineKeyboardButton("🔙 Back to Plans", callback_data="subscription_bank_menu")],
+        ]
+        await query.edit_message_text(
+            "🏦 *Choose Your Bank*\\n\\n"
+            f"📦 Plan: {selected_bank_plan.value.title()}\\n"
+            "💳 A Virtual Account will be generated for your payment.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("subscription_bank_pay:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.edit_message_text("⚠️ Invalid bank selection. Please start again with /subscription.")
+            return
+        _, plan_value, bank = parts
+        try:
+            selected_bank_plan = SubscriptionPlan(plan_value)
+        except ValueError:
+            await query.edit_message_text("⚠️ Invalid plan. Please start again with /subscription.")
+            return
+        bank_labels = {"bri": "BRI", "bni": "BNI", "cimb": "CIMB Niaga"}
+        bank_label = bank_labels.get(bank)
+        if bank_label is None:
+            await query.edit_message_text("⚠️ Unsupported bank. Please choose BRI, BNI, or CIMB Niaga.")
+            return
+
+        await query.edit_message_text("⏳ Creating your Virtual Account...")
+        payment_service = PaymentService(session)
+        try:
+            payment, transaction = await payment_service.create_bank_transfer_payment(
+                user_id=user.id,
+                plan=selected_bank_plan,
+                bank=bank,
+            )
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            error_detail = str(exc).strip()[:250] or exc.__class__.__name__
+            await query.edit_message_text(
+                "❌ Could not create the bank payment.\\n\\n"
+                f"📋 Details: {error_detail}\\n\\n"
+                "🔄 Please try again or choose another payment method."
+            )
+            return
+
+        va_number = transaction.get("va_number")
+        if not va_number:
+            await query.edit_message_text(
+                "⚠️ Midtrans created a transaction but did not return a Virtual Account number.\\n"
+                f"Order ID: `{payment.order_id}`\\n"
+                "Please contact support before making a payment."
+            )
+            return
+
+        expiry_text = (
+            payment.expiry_time.strftime("%Y-%m-%d %H:%M:%S WIB")
+            if payment.expiry_time is not None
+            else "Not provided by Midtrans"
+        )
+        details = (
+            f"🏦 *{bank_label} VIRTUAL ACCOUNT*\\n\\n"
+            f"📦 Plan: {selected_bank_plan.value.title()}\\n"
+            f"💰 Amount: {_format_idr(payment.amount)}\\n"
+            f"🔢 Virtual Account: `{va_number}`\\n"
+            f"🆔 Order ID: `{payment.order_id}`\\n"
+            "⏳ Status: PENDING\\n"
+            f"⏰ Deadline: {expiry_text}\\n\\n"
+            "📲 Transfer the exact amount to this Virtual Account using your banking app or ATM.\\n"
+            "✅ Subscription activates automatically after Midtrans confirms payment."
+        )
+        await query.edit_message_text(details, parse_mode="Markdown")
         return
 
     # NOWPayments menu is separate from the existing IDR/QRIS flow.
