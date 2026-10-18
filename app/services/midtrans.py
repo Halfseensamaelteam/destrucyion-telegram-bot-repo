@@ -138,3 +138,49 @@ class MidtransService:
             "expiry_time": expiry_time,
             "raw_response": response,
         }
+
+    def create_bank_transfer_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+        bank: str,
+    ) -> dict:
+        """Create a BRI/BNI virtual-account or Mandiri bill payment."""
+        bank = bank.lower()
+        if bank not in {"bri", "bni", "mandiri"}:
+            raise MidtransError(f"Unsupported bank: {bank}")
+
+        amount = self._get_price(plan)
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+        order_id = self.generate_order_id(user_id, plan)
+        parameter = {
+            "transaction_details": {"order_id": order_id, "gross_amount": amount},
+            "custom_expiry": {"expiry_duration": 24, "unit": "hour"},
+        }
+        if bank == "mandiri":
+            parameter["payment_type"] = "echannel"
+            parameter["echannel"] = {
+                "bill_info1": "Subscription",
+                "bill_info2": plan.value.title(),
+            }
+        else:
+            parameter["payment_type"] = "bank_transfer"
+            parameter["bank_transfer"] = {"bank": bank}
+
+        try:
+            response = self._client.charge(parameter)
+        except Exception as exc:
+            raise MidtransError(f"Failed to create Midtrans {bank.upper()} transaction: {exc}") from exc
+
+        return {
+            "order_id": order_id,
+            "transaction_id": response.get("transaction_id"),
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "status": response.get("transaction_status", "pending"),
+            "expiry_time": self._parse_expiry_time(response.get("expiry_time")),
+            "response": response,
+            "bank": bank,
+        }
