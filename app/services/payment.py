@@ -49,6 +49,35 @@ class PaymentService:
 
         return payment
 
+    async def create_bank_transfer_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+        bank: str,
+    ) -> tuple[Payment, dict]:
+        """Create and persist a BRI, BNI, or CIMB Virtual Account payment."""
+
+        transaction = self.midtrans.create_bank_transfer_transaction(
+            user_id=user_id,
+            plan=plan,
+            bank=bank,
+        )
+
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=transaction["transaction_id"],
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=None,
+            expiry_time=transaction["expiry_time"],
+        )
+
+        return payment, transaction
+
     async def process_notification(
         self,
         *,
