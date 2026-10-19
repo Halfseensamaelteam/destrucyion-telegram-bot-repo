@@ -220,20 +220,27 @@ async def subscription_payment_callback(
             return
 
         expiry_text = (
-            payment.expiry_time.strftime("%Y-%m-%d %H:%M:%S WIB")
+            payment.expiry_time.strftime("%Y-%m-%d %H:%M WIB")
             if payment.expiry_time is not None
             else "Not provided by Midtrans"
         )
         details = (
             f"🏦 *{bank_label} VIRTUAL ACCOUNT*\\n\\n"
-            f"📦 Plan: {selected_bank_plan.value.title()}\\n"
-            f"💰 Amount: {_format_idr(payment.amount)}\\n"
-            f"🔢 Virtual Account: `{va_number}`\\n"
-            f"🆔 Order ID: `{payment.order_id}`\\n"
-            "⏳ Status: PENDING\\n"
-            f"⏰ Deadline: {expiry_text}\\n\\n"
-            "📲 Transfer the exact amount to this Virtual Account using your banking app or ATM.\\n"
-            "✅ Subscription activates automatically after Midtrans confirms payment."
+            "✅ *Payment created successfully*\\n\\n"
+            f"📦 *Plan:* {selected_bank_plan.value.title()}\\n"
+            f"💰 *Total to pay:* {_format_idr(payment.amount)}\\n"
+            f"🔢 *Virtual Account Number:* `{va_number}`\\n"
+            f"🧾 *Order ID:* `{payment.order_id}`\\n"
+            "🟡 *Payment status:* Waiting for payment\\n"
+            f"⏰ *Payment deadline:* {expiry_text}\\n\\n"
+            "━━━━━━━━━━━━━━━━━━━━\\n"
+            "📲 *HOW TO PAY*\\n\\n"
+            "1. Open your banking app or visit an ATM.\\n"
+            "2. Choose transfer/payment to a Virtual Account.\\n"
+            "3. Enter the VA number shown above.\\n"
+            "4. Confirm the recipient and exact amount before paying.\\n\\n"
+            "⚠️ Please pay before the deadline. Do not pay again if you have already completed the transfer.\\n"
+            "🎉 Your subscription will activate automatically after Midtrans confirms the payment."
         )
         await query.edit_message_text(details, parse_mode="Markdown")
         return
