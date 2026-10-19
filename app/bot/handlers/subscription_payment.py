@@ -135,11 +135,16 @@ async def subscription_payment_callback(
                 plan=selected_link_plan,
             )
             await session.commit()
-        except Exception:
+        except Exception as exc:
             await session.rollback()
+            # MidtransError contains a sanitized provider response, not credentials.
+            # Show a short diagnostic so configuration/API validation issues can be fixed.
+            error_detail = str(exc).strip()[:300] or exc.__class__.__name__
             await query.edit_message_text(
                 "❌ Unable to create your Midtrans payment link.\n\n"
-                "No payment has been completed. Please try again later or choose Indonesia Payments V1."
+                f"📋 Details: {error_detail}\n\n"
+                "No payment has been completed. Check the bot logs and Midtrans Sandbox settings, "
+                "or choose Indonesia Payments V1."
             )
             return
 
