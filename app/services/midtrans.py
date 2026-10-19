@@ -148,9 +148,19 @@ class MidtransService:
     ) -> dict:
         """Create a fixed-amount hosted Midtrans Payment Link."""
         amount = self._get_price(plan)
-        order_id = self.generate_order_id(user_id, plan)
+        # Payment Link documents allow order_id up to 36 characters.
+        # Use a compact ID so the quarterly plan also stays within that limit.
+        plan_code = {
+            SubscriptionPlan.WEEKLY: "W",
+            SubscriptionPlan.MONTHLY: "M",
+            SubscriptionPlan.QUARTERLY: "Q",
+            SubscriptionPlan.LIFETIME: "L",
+        }[plan]
+        order_id = f"PL-{user_id}-{plan_code}-{uuid4().hex[:12].upper()}"
         if amount <= 0:
             raise MidtransError("Payment amount must be greater than zero.")
+        if len(order_id) > 36:
+            raise MidtransError("Generated Payment Link order_id exceeds Midtrans' 36-character limit.")
 
         settings = get_settings()
         base_url = (
@@ -163,7 +173,7 @@ class MidtransService:
                 "order_id": order_id,
                 "gross_amount": amount,
             },
-            "title": f"{plan.value.title()} Subscription",
+            "title": f"{plan.value.title()} Subscription"[:40],
             "item_details": [
                 {
                     "id": f"subscription-{plan.value}",
@@ -193,7 +203,14 @@ class MidtransService:
             detail = ""
             if isinstance(exc, httpx.HTTPStatusError):
                 try:
-                    detail = str(exc.response.json().get("error_messages", ""))[:300]
+                    error_body = exc.response.json()
+                    detail_value = (
+                        error_body.get("error_messages")
+                        or error_body.get("message")
+                        or error_body.get("error")
+                        or error_body.get("status_message")
+                    )
+                    detail = str(detail_value or error_body)[:300]
                 except (ValueError, AttributeError):
                     detail = exc.response.text[:300]
             raise MidtransError(
