@@ -75,7 +75,7 @@ def create_bot_app() -> Application:
     application.add_handler(
         CallbackQueryHandler(
             subscription_payment_callback,
-            pattern="^(subscription_qris_menu$|subscription_buy_|subscription_add_plan$|subscription_bank_|subscription_indonesia_pay:|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_|nowpayments_asset_|nowpayments_target_|np:)",
+            pattern="^(subscription_qris_menu$|subscription_payment_link_menu$|subscription_link_plan_|subscription_buy_|subscription_add_plan$|subscription_bank_|subscription_indonesia_pay:|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_|nowpayments_asset_|nowpayments_target_|np:)",
         )
     )
 

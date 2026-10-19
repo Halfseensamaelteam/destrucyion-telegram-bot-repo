@@ -49,6 +49,31 @@ class PaymentService:
 
         return payment
 
+
+    async def create_payment_link_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> tuple[Payment, dict]:
+        """Create a hosted Midtrans Payment Link and persist its pending order."""
+        transaction = self.midtrans.create_payment_link_transaction(
+            user_id=user_id,
+            plan=plan,
+        )
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=None,
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=None,
+            expiry_time=transaction["expiry_time"],
+        )
+        return payment, transaction
+
     async def create_bank_transfer_payment(
         self,
         *,

@@ -47,8 +47,9 @@ async def subscription_payment_callback(
         "subscription_buy_quarterly",
         "subscription_bank_menu",
     }
+    payment_link_actions = {"subscription_payment_link_menu"}
     is_bank_action = data.startswith("subscription_bank_")
-    if is_bank_action and not settings.enable_qris:
+    if is_bank_action and not settings.enable_midtrans_core_payments:
         await query.edit_message_text(
             "⚠️ Indonesian bank payments are temporarily disabled.\n\n"
             "🔄 Please try another payment method or check back later!"
@@ -60,10 +61,16 @@ async def subscription_payment_callback(
         or data.startswith("np:target:")
         or data.startswith("np:pay:")
     )
-    if data in qris_actions and not settings.enable_qris:
+    if (data in qris_actions or data.startswith("subscription_indonesia_pay:")) and not settings.enable_midtrans_core_payments:
         await query.edit_message_text(
             "⚠️ QRIS payment is temporarily disabled.\n\n"
             "🔄 Please try another payment method or check back later!"
+        )
+        return
+    if (data in payment_link_actions or data.startswith("subscription_link_plan_")) and not settings.enable_midtrans_payments_link:
+        await query.edit_message_text(
+            "⚠️ Indonesia Payments V2 is temporarily disabled.\n\n"
+            "🔄 Please choose another payment method or check back later!"
         )
         return
     if is_crypto_action and not settings.enable_nowpayments:
@@ -75,9 +82,13 @@ async def subscription_payment_callback(
 
     if data == "subscription_add_plan":
         keyboard = []
-        if settings.enable_qris:
+        if settings.enable_midtrans_core_payments:
             keyboard.append([
-                InlineKeyboardButton("🇮🇩 QRIS (Indonesia Payments)", callback_data="subscription_qris_menu")
+                InlineKeyboardButton("🇮🇩 Indonesia Payments V1", callback_data="subscription_qris_menu")
+            ])
+        if settings.enable_midtrans_payments_link:
+            keyboard.append([
+                InlineKeyboardButton("🇮🇩 Indonesia Payments V2", callback_data="subscription_payment_link_menu")
             ])
         if settings.enable_nowpayments:
             keyboard.append([
@@ -93,6 +104,65 @@ async def subscription_payment_callback(
         )
         return
 
+    if data == "subscription_payment_link_menu":
+        keyboard = [
+            [InlineKeyboardButton(f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}", callback_data="subscription_link_plan_weekly")],
+            [InlineKeyboardButton(f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}", callback_data="subscription_link_plan_monthly")],
+            [InlineKeyboardButton(f"📆 3 Months — {_format_idr(settings.subscription_3_monthly_price)}", callback_data="subscription_link_plan_quarterly")],
+            [InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="subscription_add_plan")],
+        ]
+        await query.edit_message_text(
+            "🇮🇩 *Indonesia Payments V2 — Payment Link*\n\n"
+            "💳 Select a plan. The bot will create a unique Midtrans checkout link.\n"
+            "✨ Subscription activates only after payment is confirmed.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    link_plans = {
+        "subscription_link_plan_weekly": SubscriptionPlan.WEEKLY,
+        "subscription_link_plan_monthly": SubscriptionPlan.MONTHLY,
+        "subscription_link_plan_quarterly": SubscriptionPlan.QUARTERLY,
+    }
+    selected_link_plan = link_plans.get(data)
+    if selected_link_plan is not None:
+        await query.edit_message_text("⏳ Creating your secure Midtrans payment link...")
+        payment_service = PaymentService(session)
+        try:
+            payment, transaction = await payment_service.create_payment_link_payment(
+                user_id=user.id,
+                plan=selected_link_plan,
+            )
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            # MidtransError contains a sanitized provider response, not credentials.
+            # Show a short diagnostic so configuration/API validation issues can be fixed.
+            error_detail = str(exc).strip()[:300] or exc.__class__.__name__
+            await query.edit_message_text(
+                "❌ Unable to create your Midtrans payment link.\n\n"
+                f"📋 Details: {error_detail}\n\n"
+                "No payment has been completed. Check the bot logs and Midtrans Sandbox settings, "
+                "or choose Indonesia Payments V1."
+            )
+            return
+
+        keyboard = [[InlineKeyboardButton("🔐 Open Midtrans Secure Checkout", url=transaction["payment_url"])]]
+        keyboard.append([InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="subscription_add_plan")])
+        await query.edit_message_text(
+            "🇮🇩 *Indonesia Payments V2 — Payment Link*\n\n"
+            f"📦 *Plan:* {selected_link_plan.value.title()}\n"
+            f"💰 *Amount:* {_format_idr(payment.amount)}\n"
+            f"🧾 *Order ID:* `{payment.order_id}`\n"
+            "⏳ *Status:* Waiting for payment\n\n"
+            "Open the secure Midtrans checkout button below and complete payment there. "
+            "Your subscription will activate automatically after Midtrans confirms the payment.\n\n"
+            "⚠️ Do not share this payment link with others.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
     if data == "subscription_qris_menu":
         keyboard = [
             [InlineKeyboardButton(

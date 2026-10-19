@@ -45,11 +45,18 @@ async def subscription_command(
         )
 
         keyboard = []
-        if settings.enable_qris:
+        if settings.enable_midtrans_core_payments:
             keyboard.append([
                 InlineKeyboardButton(
-                    "🇮🇩 Indonesia Payment",
+                    "🇮🇩 Indonesia Payments V1",
                     callback_data="subscription_qris_menu",
+                )
+            ])
+        if settings.enable_midtrans_payments_link:
+            keyboard.append([
+                InlineKeyboardButton(
+                    "🇮🇩 Indonesia Payments V2",
+                    callback_data="subscription_payment_link_menu",
                 )
             ])
         if settings.enable_nowpayments:

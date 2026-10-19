@@ -7,6 +7,7 @@ Midtrans payment gateway integration.
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
+import httpx
 import midtransclient
 
 from app.core.config import get_settings
@@ -137,6 +138,99 @@ class MidtransService:
             "qr_image_url": qr_image_url,
             "expiry_time": expiry_time,
             "raw_response": response,
+        }
+
+
+    def create_payment_link_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> dict:
+        """Create a fixed-amount hosted Midtrans Payment Link."""
+        amount = self._get_price(plan)
+        # Payment Link documents allow order_id up to 36 characters.
+        # Use a compact ID so the quarterly plan also stays within that limit.
+        plan_code = {
+            SubscriptionPlan.WEEKLY: "W",
+            SubscriptionPlan.MONTHLY: "M",
+            SubscriptionPlan.QUARTERLY: "Q",
+            SubscriptionPlan.LIFETIME: "L",
+        }[plan]
+        order_id = f"PL-{user_id}-{plan_code}-{uuid4().hex[:12].upper()}"
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+        if len(order_id) > 36:
+            raise MidtransError("Generated Payment Link order_id exceeds Midtrans' 36-character limit.")
+
+        settings = get_settings()
+        base_url = (
+            "https://api.midtrans.com"
+            if settings.midtrans_is_production
+            else "https://api.sandbox.midtrans.com"
+        )
+        payload = {
+            "transaction_details": {
+                "order_id": order_id,
+                "gross_amount": amount,
+            },
+            "title": f"{plan.value.title()} Subscription"[:40],
+            "item_details": [
+                {
+                    "id": f"subscription-{plan.value}",
+                    "price": amount,
+                    "quantity": 1,
+                    "name": f"{plan.value.title()} Subscription",
+                }
+            ],
+            "usage_limit": 1,
+            "expiry": {
+                "duration": 30,
+                "unit": "minutes",
+            },
+        }
+
+        try:
+            response = httpx.post(
+                f"{base_url}/v1/payment-links",
+                json=payload,
+                auth=(settings.midtrans_server_key.get_secret_value(), ""),
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            detail = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    error_body = exc.response.json()
+                    detail_value = (
+                        error_body.get("error_messages")
+                        or error_body.get("message")
+                        or error_body.get("error")
+                        or error_body.get("status_message")
+                    )
+                    detail = str(detail_value or error_body)[:300]
+                except (ValueError, AttributeError):
+                    detail = exc.response.text[:300]
+            raise MidtransError(
+                f"Failed to create Midtrans Payment Link{': ' + detail if detail else ''}"
+            ) from exc
+
+        payment_url = result.get("payment_url")
+        if not payment_url or not str(payment_url).startswith("https://"):
+            raise MidtransError("Midtrans did not return a valid HTTPS payment_url.")
+
+        return {
+            "order_id": order_id,
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "status": "pending",
+            "transaction_id": None,
+            "payment_url": payment_url,
+            "expiry_time": None,
+            "raw_response": result,
         }
 
     def create_mandiri_bill_transaction(
