@@ -7,6 +7,7 @@ Midtrans payment gateway integration.
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 
+import httpx
 import midtransclient
 
 from app.core.config import get_settings
@@ -137,6 +138,82 @@ class MidtransService:
             "qr_image_url": qr_image_url,
             "expiry_time": expiry_time,
             "raw_response": response,
+        }
+
+
+    def create_payment_link_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> dict:
+        """Create a fixed-amount hosted Midtrans Payment Link."""
+        amount = self._get_price(plan)
+        order_id = self.generate_order_id(user_id, plan)
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+
+        settings = get_settings()
+        base_url = (
+            "https://api.midtrans.com"
+            if settings.midtrans_is_production
+            else "https://api.sandbox.midtrans.com"
+        )
+        payload = {
+            "transaction_details": {
+                "order_id": order_id,
+                "gross_amount": amount,
+            },
+            "title": f"{plan.value.title()} Subscription",
+            "item_details": [
+                {
+                    "id": f"subscription-{plan.value}",
+                    "price": amount,
+                    "quantity": 1,
+                    "name": f"{plan.value.title()} Subscription",
+                }
+            ],
+            "usage_limit": 1,
+            "expiry": {
+                "duration": 30,
+                "unit": "minute",
+            },
+        }
+
+        try:
+            response = httpx.post(
+                f"{base_url}/v1/payment-links",
+                json=payload,
+                auth=(settings.midtrans_server_key.get_secret_value(), ""),
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=20.0,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            detail = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    detail = str(exc.response.json().get("error_messages", ""))[:300]
+                except (ValueError, AttributeError):
+                    detail = exc.response.text[:300]
+            raise MidtransError(
+                f"Failed to create Midtrans Payment Link{': ' + detail if detail else ''}"
+            ) from exc
+
+        payment_url = result.get("payment_url")
+        if not payment_url or not str(payment_url).startswith("https://"):
+            raise MidtransError("Midtrans did not return a valid HTTPS payment_url.")
+
+        return {
+            "order_id": order_id,
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "status": "pending",
+            "transaction_id": None,
+            "payment_url": payment_url,
+            "expiry_time": None,
+            "raw_response": result,
         }
 
     def create_mandiri_bill_transaction(
