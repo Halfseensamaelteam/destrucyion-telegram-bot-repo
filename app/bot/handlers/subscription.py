@@ -48,14 +48,14 @@ async def subscription_command(
         if settings.enable_qris:
             keyboard.append([
                 InlineKeyboardButton(
-                    "🇮🇩 QRIS (Indonesia Payments)",
+                    "🇮🇩 Indonesia Payment",
                     callback_data="subscription_qris_menu",
                 )
             ])
         if settings.enable_nowpayments:
             keyboard.append([
                 InlineKeyboardButton(
-                    "💠 Crypto Payment (International Payments)",
+                    "💠 Crypto (International)",
                     callback_data="nowpayments_menu",
                 )
             ])
