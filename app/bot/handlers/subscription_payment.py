@@ -45,7 +45,15 @@ async def subscription_payment_callback(
         "subscription_buy_weekly",
         "subscription_buy_monthly",
         "subscription_buy_quarterly",
+        "subscription_bank_menu",
     }
+    is_bank_action = data.startswith("subscription_bank_")
+    if is_bank_action and not settings.enable_qris:
+        await query.edit_message_text(
+            "⚠️ Indonesian bank payments are temporarily disabled.\n\n"
+            "🔄 Please try another payment method or check back later!"
+        )
+        return
     is_crypto_action = (
         data == "nowpayments_menu"
         or data.startswith("nowpayments_plan_")
@@ -101,12 +109,192 @@ async def subscription_payment_callback(
             )],
         ]
         await query.edit_message_text(
-            "🇮🇩 *QRIS Payment*\n\n"
-            "💎 Select the plan that suits you best:\n\n"
+            "🇮🇩 *Indonesia Payment*\n\n"
+            "💎 Select the plan that suits you best:\n"
             "✨ Instant activation after payment!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return
+
+    if data == "subscription_bank_menu":
+        await query.edit_message_text(
+            "⚠️ Please select a subscription plan first using Indonesia Payment."
+        )
+        return
+
+    indonesia_plan_callbacks = {
+        "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
+        "subscription_buy_monthly": SubscriptionPlan.MONTHLY,
+        "subscription_buy_quarterly": SubscriptionPlan.QUARTERLY,
+    }
+    selected_indonesia_plan = indonesia_plan_callbacks.get(data)
+    if selected_indonesia_plan is not None:
+        keyboard = [
+            [InlineKeyboardButton("📱 QRIS", callback_data=f"subscription_indonesia_pay:{selected_indonesia_plan.value}:qris")],
+            [
+                InlineKeyboardButton("🏦 BANK BRI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:bri"),
+                InlineKeyboardButton("🏦 BANK BNI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:bni"),
+            ],
+            [
+                InlineKeyboardButton("🏦 CIMB NIAGA", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:cimb"),
+                InlineKeyboardButton("🏦 BANK MANDIRI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:mandiri"),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Plans", callback_data="subscription_qris_menu")],
+        ]
+        await query.edit_message_text(
+            "🇮🇩 *Indonesia Payment*\n\n"
+            f"📦 Selected Plan: {selected_indonesia_plan.value.title()} "
+            f"({_format_idr(PaymentService(session).midtrans._get_price(selected_indonesia_plan))})\n"
+            "💳 Choose Payment Method:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    if data.startswith("subscription_indonesia_pay:"):
+        parts = data.split(":")
+        if len(parts) != 3 or parts[2] != "qris":
+            await query.edit_message_text("⚠️ Invalid QRIS selection. Please start again.")
+            return
+        try:
+            selected_qris_plan = SubscriptionPlan(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Invalid plan. Please start again.")
+            return
+        # Reuse the existing QRIS flow below.
+        data = {
+            SubscriptionPlan.WEEKLY: "subscription_buy_weekly",
+            SubscriptionPlan.MONTHLY: "subscription_buy_monthly",
+            SubscriptionPlan.QUARTERLY: "subscription_buy_quarterly",
+        }.get(selected_qris_plan, "")
+        
+    if data.startswith("subscription_bank_pay:"):
+        parts = data.split(":")
+        if len(parts) != 3:
+            await query.edit_message_text("⚠️ Invalid bank selection. Please start again.")
+            return
+        _, plan_value, bank = parts
+        try:
+            selected_bank_plan = SubscriptionPlan(plan_value)
+        except ValueError:
+            await query.edit_message_text("⚠️ Invalid plan. Please start again.")
+            return
+        bank_labels = {"bri": "BANK BRI", "bni": "BANK BNI", "cimb": "CIMB NIAGA"}
+        if bank == "mandiri":
+            await query.edit_message_text("⏳ Creating your Mandiri bill payment...")
+            payment_service = PaymentService(session)
+            try:
+                payment, transaction = await payment_service.create_mandiri_bill_payment(
+                    user_id=user.id,
+                    plan=selected_bank_plan,
+                )
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                error_detail = str(exc).strip()[:250] or exc.__class__.__name__
+                await query.edit_message_text(
+                    "❌ Could not create the Mandiri payment.\n\n"
+                    f"📋 Details: {error_detail}\n\n"
+                    "🔄 Please try again or choose another payment method."
+                )
+                return
+
+            biller_code = transaction.get("biller_code")
+            bill_key = transaction.get("bill_key")
+            if not biller_code or not bill_key:
+                await query.edit_message_text(
+                    "⚠️ Midtrans created a transaction but did not return the Mandiri biller code and bill key.\n"
+                    f"Order ID: `{payment.order_id}`\n"
+                    "Please contact support before making a payment."
+                )
+                return
+
+            expiry_text = (
+                payment.expiry_time.strftime("%Y-%m-%d %H:%M WIB")
+                if payment.expiry_time is not None
+                else "Not provided by Midtrans"
+            )
+            details = (
+                "🏦 *BANK MANDIRI — BILL PAYMENT*\n\n"
+                "✅ *Payment created successfully*\n\n"
+                f"📦 *Plan:* {selected_bank_plan.value.title()}\n"
+                f"💰 *Total to pay:* {_format_idr(payment.amount)}\n"
+                f"🏢 *Biller Code:* `{biller_code}`\n"
+                f"🔑 *Bill Key:* `{bill_key}`\n"
+                f"🧾 *Order ID:* `{payment.order_id}`\n"
+                "🟡 *Payment status:* Waiting for payment\n"
+                f"⏰ *Payment deadline:* {expiry_text}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "📲 *HOW TO PAY*\n\n"
+                "1. Open Livin' by Mandiri or visit a Mandiri ATM.\n"
+                "2. Choose the payment menu for *Multipayment* / *Bayar*.\n"
+                "3. Enter the Biller Code shown above.\n"
+                "4. Enter the Bill Key shown above.\n"
+                "5. Check the displayed amount and billing details, then confirm.\n\n"
+                "⚠️ Pay before the deadline and verify the amount before confirming.\n"
+                "🎉 Your subscription activates automatically after Midtrans confirms payment."
+            )
+            await query.edit_message_text(details, parse_mode="Markdown")
+            return
+
+        bank_label = bank_labels.get(bank)
+        if bank_label is None:
+            await query.edit_message_text("⚠️ Unsupported bank. Please choose BRI, BNI, or CIMB Niaga.")
+            return
+
+        await query.edit_message_text("⏳ Creating your Virtual Account...")
+        payment_service = PaymentService(session)
+        try:
+            payment, transaction = await payment_service.create_bank_transfer_payment(
+                user_id=user.id,
+                plan=selected_bank_plan,
+                bank=bank,
+            )
+            await session.commit()
+        except Exception as exc:
+            await session.rollback()
+            error_detail = str(exc).strip()[:250] or exc.__class__.__name__
+            await query.edit_message_text(
+                "❌ Could not create the bank payment.\n\n"
+                f"📋 Details: {error_detail}\n\n"
+                "🔄 Please try again or choose another payment method."
+            )
+            return
+
+        va_number = transaction.get("va_number")
+        if not va_number:
+            await query.edit_message_text(
+                "⚠️ Midtrans created a transaction but did not return a Virtual Account number.\n"
+                f"Order ID: `{payment.order_id}`\n"
+                "Please contact support before making a payment."
+            )
+            return
+
+        expiry_text = (
+            payment.expiry_time.strftime("%Y-%m-%d %H:%M WIB")
+            if payment.expiry_time is not None
+            else "Not provided by Midtrans"
+        )
+        details = (
+            f"🏦 *{bank_label} VIRTUAL ACCOUNT*\n\n"
+            "✅ *Payment created successfully*\n\n"
+            f"📦 *Plan:* {selected_bank_plan.value.title()}\n"
+            f"💰 *Total to pay:* {_format_idr(payment.amount)}\n"
+            f"🔢 *Virtual Account Number:* `{va_number}`\n"
+            f"🧾 *Order ID:* `{payment.order_id}`\n"
+            "🟡 *Payment status:* Waiting for payment\n"
+            f"⏰ *Payment deadline:* {expiry_text}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📲 *HOW TO PAY*\n\n"
+            "1. Open your banking app or visit an ATM.\n"
+            "2. Choose transfer/payment to a Virtual Account.\n"
+            "3. Enter the VA number shown above.\n"
+            "4. Confirm the recipient and exact amount before paying.\n\n"
+            "⚠️ Please pay before the deadline. Do not pay again if you have already completed the transfer.\n"
+            "🎉 Your subscription will activate automatically after Midtrans confirms the payment."
+        )
+        await query.edit_message_text(details, parse_mode="Markdown")
         return
 
     # NOWPayments menu is separate from the existing IDR/QRIS flow.

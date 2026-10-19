@@ -138,3 +138,114 @@ class MidtransService:
             "expiry_time": expiry_time,
             "raw_response": response,
         }
+
+    def create_mandiri_bill_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> dict:
+        """Create a Midtrans Mandiri Bill Payment (E-Channel) transaction."""
+        amount = self._get_price(plan)
+        order_id = self.generate_order_id(user_id, plan)
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+
+        parameter = {
+            "payment_type": "echannel",
+            "transaction_details": {
+                "order_id": order_id,
+                "gross_amount": amount,
+            },
+            "echannel": {
+                "bill_info1": "Subscription",
+                "bill_info2": f"{plan.value.title()} plan",
+            },
+        }
+
+        try:
+            response = self._client.charge(parameter)
+        except Exception as exc:
+            raise MidtransError(
+                f"Failed to create Midtrans Mandiri Bill transaction: {exc}"
+            ) from exc
+
+        biller_code = response.get("biller_code")
+        bill_key = response.get("bill_key")
+        if not biller_code or not bill_key:
+            raise MidtransError(
+                "Midtrans did not return the Mandiri biller_code and bill_key."
+            )
+
+        return {
+            "order_id": order_id,
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "payment_type": "echannel",
+            "biller_code": str(biller_code),
+            "bill_key": str(bill_key),
+            "status": response.get("transaction_status"),
+            "transaction_id": response.get("transaction_id"),
+            "expiry_time": self._parse_expiry_time(response.get("expiry_time")),
+            "raw_response": response,
+        }
+
+
+    def create_bank_transfer_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+        bank: str,
+    ) -> dict:
+        """Create a Midtrans Virtual Account transaction for BRI, BNI, or CIMB."""
+        supported_banks = {"bri", "bni", "cimb"}
+        normalized_bank = bank.strip().lower()
+        if normalized_bank not in supported_banks:
+            raise MidtransError(
+                f"Unsupported Virtual Account bank: {bank}. "
+                "Supported banks are BRI, BNI, and CIMB."
+            )
+
+        amount = self._get_price(plan)
+        order_id = self.generate_order_id(user_id, plan)
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+
+        parameter = {
+            "payment_type": "bank_transfer",
+            "transaction_details": {
+                "order_id": order_id,
+                "gross_amount": amount,
+            },
+            "bank_transfer": {"bank": normalized_bank},
+        }
+        try:
+            response = self._client.charge(parameter)
+        except Exception as exc:
+            raise MidtransError(
+                f"Failed to create Midtrans {normalized_bank.upper()} Virtual Account: {exc}"
+            ) from exc
+
+        bank_transfer = response.get("bank_transfer") or {}
+        va_number = bank_transfer.get("va_number") or response.get("va_number")
+        if not va_number:
+            va_numbers = response.get("va_numbers") or []
+            for item in va_numbers:
+                if str(item.get("bank", "")).lower() == normalized_bank:
+                    va_number = item.get("va_number")
+                    break
+            if not va_number and len(va_numbers) == 1:
+                va_number = va_numbers[0].get("va_number")
+
+        return {
+            "order_id": order_id,
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "bank": normalized_bank,
+            "va_number": str(va_number) if va_number else None,
+            "status": response.get("transaction_status"),
+            "transaction_id": response.get("transaction_id"),
+            "expiry_time": self._parse_expiry_time(response.get("expiry_time")),
+            "raw_response": response,
+        }
