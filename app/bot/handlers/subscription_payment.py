@@ -51,7 +51,7 @@ async def subscription_payment_callback(
     is_bank_action = data.startswith("subscription_bank_")
     if is_bank_action and not settings.enable_midtrans_core_payments:
         await query.edit_message_text(
-            "⚠️ Indonesian bank payments are temporarily disabled.\\n\\n"
+            "⚠️ Indonesian bank payments are temporarily disabled.\n\n"
             "🔄 Please try another payment method or check back later!"
         )
         return
@@ -65,6 +65,12 @@ async def subscription_payment_callback(
         await query.edit_message_text(
             "⚠️ QRIS payment is temporarily disabled.\n\n"
             "🔄 Please try another payment method or check back later!"
+        )
+        return
+    if (data in payment_link_actions or data.startswith("subscription_link_plan_")) and not settings.enable_midtrans_payments_link:
+        await query.edit_message_text(
+            "⚠️ Indonesia Payments V2 is temporarily disabled.\n\n"
+            "🔄 Please choose another payment method or check back later!"
         )
         return
     if is_crypto_action and not settings.enable_nowpayments:
@@ -106,8 +112,8 @@ async def subscription_payment_callback(
             [InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="subscription_add_plan")],
         ]
         await query.edit_message_text(
-            "🇮🇩 *Indonesia Payments V2 — Payment Link*\\n\\n"
-            "💳 Select a plan. The bot will create a unique Midtrans checkout link.\\n"
+            "🇮🇩 *Indonesia Payments V2 — Payment Link*\n\n"
+            "💳 Select a plan. The bot will create a unique Midtrans checkout link.\n"
             "✨ Subscription activates only after payment is confirmed.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -132,7 +138,7 @@ async def subscription_payment_callback(
         except Exception:
             await session.rollback()
             await query.edit_message_text(
-                "❌ Unable to create your Midtrans payment link.\\n\\n"
+                "❌ Unable to create your Midtrans payment link.\n\n"
                 "No payment has been completed. Please try again later or choose Indonesia Payments V1."
             )
             return
@@ -140,13 +146,13 @@ async def subscription_payment_callback(
         keyboard = [[InlineKeyboardButton("🔐 Open Midtrans Secure Checkout", url=transaction["payment_url"])]]
         keyboard.append([InlineKeyboardButton("⬅️ Back to Payment Methods", callback_data="subscription_add_plan")])
         await query.edit_message_text(
-            "🇮🇩 *Indonesia Payments V2 — Payment Link*\\n\\n"
-            f"📦 *Plan:* {selected_link_plan.value.title()}\\n"
-            f"💰 *Amount:* {_format_idr(payment.amount)}\\n"
-            f"🧾 *Order ID:* `{payment.order_id}`\\n"
-            "⏳ *Status:* Waiting for payment\\n\\n"
+            "🇮🇩 *Indonesia Payments V2 — Payment Link*\n\n"
+            f"📦 *Plan:* {selected_link_plan.value.title()}\n"
+            f"💰 *Amount:* {_format_idr(payment.amount)}\n"
+            f"🧾 *Order ID:* `{payment.order_id}`\n"
+            "⏳ *Status:* Waiting for payment\n\n"
             "Open the secure Midtrans checkout button below and complete payment there. "
-            "Your subscription will activate automatically after Midtrans confirms the payment.\\n\\n"
+            "Your subscription will activate automatically after Midtrans confirms the payment.\n\n"
             "⚠️ Do not share this payment link with others.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -168,8 +174,8 @@ async def subscription_payment_callback(
             )],
         ]
         await query.edit_message_text(
-            "🇮🇩 *Indonesia Payment*\\n\\n"
-            "💎 Select the plan that suits you best:\\n"
+            "🇮🇩 *Indonesia Payment*\n\n"
+            "💎 Select the plan that suits you best:\n"
             "✨ Instant activation after payment!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -202,9 +208,9 @@ async def subscription_payment_callback(
             [InlineKeyboardButton("⬅️ Back to Plans", callback_data="subscription_qris_menu")],
         ]
         await query.edit_message_text(
-            "🇮🇩 *Indonesia Payment*\\n\\n"
+            "🇮🇩 *Indonesia Payment*\n\n"
             f"📦 Selected Plan: {selected_indonesia_plan.value.title()} "
-            f"({_format_idr(PaymentService(session).midtrans._get_price(selected_indonesia_plan))})\\n"
+            f"({_format_idr(PaymentService(session).midtrans._get_price(selected_indonesia_plan))})\n"
             "💳 Choose Payment Method:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -315,8 +321,8 @@ async def subscription_payment_callback(
             await session.rollback()
             error_detail = str(exc).strip()[:250] or exc.__class__.__name__
             await query.edit_message_text(
-                "❌ Could not create the bank payment.\\n\\n"
-                f"📋 Details: {error_detail}\\n\\n"
+                "❌ Could not create the bank payment.\n\n"
+                f"📋 Details: {error_detail}\n\n"
                 "🔄 Please try again or choose another payment method."
             )
             return
@@ -324,8 +330,8 @@ async def subscription_payment_callback(
         va_number = transaction.get("va_number")
         if not va_number:
             await query.edit_message_text(
-                "⚠️ Midtrans created a transaction but did not return a Virtual Account number.\\n"
-                f"Order ID: `{payment.order_id}`\\n"
+                "⚠️ Midtrans created a transaction but did not return a Virtual Account number.\n"
+                f"Order ID: `{payment.order_id}`\n"
                 "Please contact support before making a payment."
             )
             return
@@ -336,21 +342,21 @@ async def subscription_payment_callback(
             else "Not provided by Midtrans"
         )
         details = (
-            f"🏦 *{bank_label} VIRTUAL ACCOUNT*\\n\\n"
-            "✅ *Payment created successfully*\\n\\n"
-            f"📦 *Plan:* {selected_bank_plan.value.title()}\\n"
-            f"💰 *Total to pay:* {_format_idr(payment.amount)}\\n"
-            f"🔢 *Virtual Account Number:* `{va_number}`\\n"
-            f"🧾 *Order ID:* `{payment.order_id}`\\n"
-            "🟡 *Payment status:* Waiting for payment\\n"
-            f"⏰ *Payment deadline:* {expiry_text}\\n\\n"
-            "━━━━━━━━━━━━━━━━━━━━\\n"
-            "📲 *HOW TO PAY*\\n\\n"
-            "1. Open your banking app or visit an ATM.\\n"
-            "2. Choose transfer/payment to a Virtual Account.\\n"
-            "3. Enter the VA number shown above.\\n"
-            "4. Confirm the recipient and exact amount before paying.\\n\\n"
-            "⚠️ Please pay before the deadline. Do not pay again if you have already completed the transfer.\\n"
+            f"🏦 *{bank_label} VIRTUAL ACCOUNT*\n\n"
+            "✅ *Payment created successfully*\n\n"
+            f"📦 *Plan:* {selected_bank_plan.value.title()}\n"
+            f"💰 *Total to pay:* {_format_idr(payment.amount)}\n"
+            f"🔢 *Virtual Account Number:* `{va_number}`\n"
+            f"🧾 *Order ID:* `{payment.order_id}`\n"
+            "🟡 *Payment status:* Waiting for payment\n"
+            f"⏰ *Payment deadline:* {expiry_text}\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📲 *HOW TO PAY*\n\n"
+            "1. Open your banking app or visit an ATM.\n"
+            "2. Choose transfer/payment to a Virtual Account.\n"
+            "3. Enter the VA number shown above.\n"
+            "4. Confirm the recipient and exact amount before paying.\n\n"
+            "⚠️ Please pay before the deadline. Do not pay again if you have already completed the transfer.\n"
             "🎉 Your subscription will activate automatically after Midtrans confirms the payment."
         )
         await query.edit_message_text(details, parse_mode="Markdown")
