@@ -182,10 +182,62 @@ async def subscription_payment_callback(
             return
         bank_labels = {"bri": "BANK BRI", "bni": "BANK BNI", "cimb": "CIMB NIAGA"}
         if bank == "mandiri":
-            await query.edit_message_text(
-                "🏦 Bank Mandiri uses a different payment flow and will be added in a later update."
+            await query.edit_message_text("⏳ Creating your Mandiri bill payment...")
+            payment_service = PaymentService(session)
+            try:
+                payment, transaction = await payment_service.create_mandiri_bill_payment(
+                    user_id=user.id,
+                    plan=selected_bank_plan,
+                )
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                error_detail = str(exc).strip()[:250] or exc.__class__.__name__
+                await query.edit_message_text(
+                    "❌ Could not create the Mandiri payment.\n\n"
+                    f"📋 Details: {error_detail}\n\n"
+                    "🔄 Please try again or choose another payment method."
+                )
+                return
+
+            biller_code = transaction.get("biller_code")
+            bill_key = transaction.get("bill_key")
+            if not biller_code or not bill_key:
+                await query.edit_message_text(
+                    "⚠️ Midtrans created a transaction but did not return the Mandiri biller code and bill key.\n"
+                    f"Order ID: `{payment.order_id}`\n"
+                    "Please contact support before making a payment."
+                )
+                return
+
+            expiry_text = (
+                payment.expiry_time.strftime("%Y-%m-%d %H:%M WIB")
+                if payment.expiry_time is not None
+                else "Not provided by Midtrans"
             )
+            details = (
+                "🏦 *BANK MANDIRI — BILL PAYMENT*\n\n"
+                "✅ *Payment created successfully*\n\n"
+                f"📦 *Plan:* {selected_bank_plan.value.title()}\n"
+                f"💰 *Total to pay:* {_format_idr(payment.amount)}\n"
+                f"🏢 *Biller Code:* `{biller_code}`\n"
+                f"🔑 *Bill Key:* `{bill_key}`\n"
+                f"🧾 *Order ID:* `{payment.order_id}`\n"
+                "🟡 *Payment status:* Waiting for payment\n"
+                f"⏰ *Payment deadline:* {expiry_text}\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "📲 *HOW TO PAY*\n\n"
+                "1. Open Livin' by Mandiri or visit a Mandiri ATM.\n"
+                "2. Choose the payment menu for *Multipayment* / *Bayar*.\n"
+                "3. Enter the Biller Code shown above.\n"
+                "4. Enter the Bill Key shown above.\n"
+                "5. Check the displayed amount and billing details, then confirm.\n\n"
+                "⚠️ Pay before the deadline and verify the amount before confirming.\n"
+                "🎉 Your subscription activates automatically after Midtrans confirms payment."
+            )
+            await query.edit_message_text(details, parse_mode="Markdown")
             return
+
         bank_label = bank_labels.get(bank)
         if bank_label is None:
             await query.edit_message_text("⚠️ Unsupported bank. Please choose BRI, BNI, or CIMB Niaga.")

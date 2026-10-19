@@ -139,6 +139,58 @@ class MidtransService:
             "raw_response": response,
         }
 
+    def create_mandiri_bill_transaction(
+        self,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> dict:
+        """Create a Midtrans Mandiri Bill Payment (E-Channel) transaction."""
+        amount = self._get_price(plan)
+        order_id = self.generate_order_id(user_id, plan)
+        if amount <= 0:
+            raise MidtransError("Payment amount must be greater than zero.")
+
+        parameter = {
+            "payment_type": "echannel",
+            "transaction_details": {
+                "order_id": order_id,
+                "gross_amount": amount,
+            },
+            "echannel": {
+                "bill_info1": "Subscription",
+                "bill_info2": f"{plan.value.title()} plan",
+            },
+        }
+
+        try:
+            response = self._client.charge(parameter)
+        except Exception as exc:
+            raise MidtransError(
+                f"Failed to create Midtrans Mandiri Bill transaction: {exc}"
+            ) from exc
+
+        biller_code = response.get("biller_code")
+        bill_key = response.get("bill_key")
+        if not biller_code or not bill_key:
+            raise MidtransError(
+                "Midtrans did not return the Mandiri biller_code and bill_key."
+            )
+
+        return {
+            "order_id": order_id,
+            "plan": plan.value,
+            "amount": amount,
+            "currency": "IDR",
+            "payment_type": "echannel",
+            "biller_code": str(biller_code),
+            "bill_key": str(bill_key),
+            "status": response.get("transaction_status"),
+            "transaction_id": response.get("transaction_id"),
+            "expiry_time": self._parse_expiry_time(response.get("expiry_time")),
+            "raw_response": response,
+        }
+
+
     def create_bank_transfer_transaction(
         self,
         user_id: int,
