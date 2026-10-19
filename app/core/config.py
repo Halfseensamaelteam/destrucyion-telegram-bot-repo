@@ -174,9 +174,13 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Payment method availability
     # ------------------------------------------------------------------
-    enable_qris: bool = Field(
+    enable_midtrans_core_payments: bool = Field(
         default=True,
-        description="Show QRIS as a subscription payment method in the Telegram bot.",
+        description="Show Indonesia Payments V1 (Midtrans Core API: QRIS and bank transfers).",
+    )
+    enable_midtrans_payments_link: bool = Field(
+        default=True,
+        description="Show Indonesia Payments V2 (Midtrans hosted Payment Link checkout).",
     )
     enable_nowpayments: bool = Field(
         default=True,
