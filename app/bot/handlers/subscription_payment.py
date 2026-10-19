@@ -61,7 +61,7 @@ async def subscription_payment_callback(
         or data.startswith("np:target:")
         or data.startswith("np:pay:")
     )
-    if data in qris_actions and not settings.enable_midtrans_core_payments:
+    if (data in qris_actions or data.startswith("subscription_indonesia_pay:")) and not settings.enable_midtrans_core_payments:
         await query.edit_message_text(
             "⚠️ QRIS payment is temporarily disabled.\n\n"
             "🔄 Please try another payment method or check back later!"
