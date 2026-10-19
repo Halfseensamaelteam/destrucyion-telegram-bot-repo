@@ -79,9 +79,6 @@ async def subscription_payment_callback(
             keyboard.append([
                 InlineKeyboardButton("🇮🇩 QRIS (Indonesia Payments)", callback_data="subscription_qris_menu")
             ])
-            keyboard.append([
-                InlineKeyboardButton("🏦 Bank Transfer (BRI / BNI / CIMB)", callback_data="subscription_bank_menu")
-            ])
         if settings.enable_nowpayments:
             keyboard.append([
                 InlineKeyboardButton("💠 Crypto (International)", callback_data="nowpayments_menu")
@@ -112,8 +109,8 @@ async def subscription_payment_callback(
             )],
         ]
         await query.edit_message_text(
-            "🇮🇩 *QRIS Payment*\n\n"
-            "💎 Select the plan that suits you best:\n\n"
+            "🇮🇩 *Indonesia Payment*\\n\\n"
+            "💎 Select the plan that suits you best:\\n"
             "✨ Instant activation after payment!",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -121,64 +118,74 @@ async def subscription_payment_callback(
         return
 
     if data == "subscription_bank_menu":
-        keyboard = [
-            [InlineKeyboardButton(
-                f"🗓️ Weekly — {_format_idr(settings.subscription_weekly_price)}",
-                callback_data="subscription_bank_plan_weekly",
-            )],
-            [InlineKeyboardButton(
-                f"📅 Monthly — {_format_idr(settings.subscription_monthly_price)}",
-                callback_data="subscription_bank_plan_monthly",
-            )],
-            [InlineKeyboardButton(
-                f"📆 3 Months — {_format_idr(settings.subscription_3_monthly_price)}",
-                callback_data="subscription_bank_plan_quarterly",
-            )],
-            [InlineKeyboardButton("🔙 Back", callback_data="subscription_add_plan")],
-        ]
         await query.edit_message_text(
-            "🏦 *Bank Transfer*\\n\\n"
-            "💎 Select your subscription plan.\\n"
-            "Supported banks: BRI, BNI, and CIMB Niaga.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "⚠️ Please select a subscription plan first using Indonesia Payment."
         )
         return
 
-    bank_plan_callbacks = {
-        "subscription_bank_plan_weekly": SubscriptionPlan.WEEKLY,
-        "subscription_bank_plan_monthly": SubscriptionPlan.MONTHLY,
-        "subscription_bank_plan_quarterly": SubscriptionPlan.QUARTERLY,
+    indonesia_plan_callbacks = {
+        "subscription_buy_weekly": SubscriptionPlan.WEEKLY,
+        "subscription_buy_monthly": SubscriptionPlan.MONTHLY,
+        "subscription_buy_quarterly": SubscriptionPlan.QUARTERLY,
     }
-    selected_bank_plan = bank_plan_callbacks.get(data)
-    if selected_bank_plan is not None:
+    selected_indonesia_plan = indonesia_plan_callbacks.get(data)
+    if selected_indonesia_plan is not None:
         keyboard = [
-            [InlineKeyboardButton("🏦 BRI", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:bri")],
-            [InlineKeyboardButton("🏦 BNI", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:bni")],
-            [InlineKeyboardButton("🏦 CIMB Niaga", callback_data=f"subscription_bank_pay:{selected_bank_plan.value}:cimb")],
-            [InlineKeyboardButton("🔙 Back to Plans", callback_data="subscription_bank_menu")],
+            [InlineKeyboardButton("📱 QRIS", callback_data=f"subscription_indonesia_pay:{selected_indonesia_plan.value}:qris")],
+            [
+                InlineKeyboardButton("🏦 BANK BRI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:bri"),
+                InlineKeyboardButton("🏦 BANK BNI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:bni"),
+            ],
+            [
+                InlineKeyboardButton("🏦 CIMB NIAGA", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:cimb"),
+                InlineKeyboardButton("🏦 BANK MANDIRI", callback_data=f"subscription_bank_pay:{selected_indonesia_plan.value}:mandiri"),
+            ],
+            [InlineKeyboardButton("⬅️ Back to Plans", callback_data="subscription_qris_menu")],
         ]
         await query.edit_message_text(
-            "🏦 *Choose Your Bank*\\n\\n"
-            f"📦 Plan: {selected_bank_plan.value.title()}\\n"
-            "💳 A Virtual Account will be generated for your payment.",
+            "🇮🇩 *Indonesia Payment*\\n\\n"
+            f"📦 Selected Plan: {selected_indonesia_plan.value.title()} "
+            f"({_format_idr(PaymentService(session).midtrans._get_price(selected_indonesia_plan))})\\n"
+            "💳 Choose Payment Method:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return
 
+    if data.startswith("subscription_indonesia_pay:"):
+        parts = data.split(":")
+        if len(parts) != 3 or parts[2] != "qris":
+            await query.edit_message_text("⚠️ Invalid QRIS selection. Please start again.")
+            return
+        try:
+            selected_qris_plan = SubscriptionPlan(parts[1])
+        except ValueError:
+            await query.edit_message_text("⚠️ Invalid plan. Please start again.")
+            return
+        # Reuse the existing QRIS flow below.
+        data = {
+            SubscriptionPlan.WEEKLY: "subscription_buy_weekly",
+            SubscriptionPlan.MONTHLY: "subscription_buy_monthly",
+            SubscriptionPlan.QUARTERLY: "subscription_buy_quarterly",
+        }.get(selected_qris_plan, "")
+        
     if data.startswith("subscription_bank_pay:"):
         parts = data.split(":")
         if len(parts) != 3:
-            await query.edit_message_text("⚠️ Invalid bank selection. Please start again with /subscription.")
+            await query.edit_message_text("⚠️ Invalid bank selection. Please start again.")
             return
         _, plan_value, bank = parts
         try:
             selected_bank_plan = SubscriptionPlan(plan_value)
         except ValueError:
-            await query.edit_message_text("⚠️ Invalid plan. Please start again with /subscription.")
+            await query.edit_message_text("⚠️ Invalid plan. Please start again.")
             return
-        bank_labels = {"bri": "BRI", "bni": "BNI", "cimb": "CIMB Niaga"}
+        bank_labels = {"bri": "BANK BRI", "bni": "BANK BNI", "cimb": "CIMB NIAGA"}
+        if bank == "mandiri":
+            await query.edit_message_text(
+                "🏦 Bank Mandiri uses a different payment flow and will be added in a later update."
+            )
+            return
         bank_label = bank_labels.get(bank)
         if bank_label is None:
             await query.edit_message_text("⚠️ Unsupported bank. Please choose BRI, BNI, or CIMB Niaga.")
