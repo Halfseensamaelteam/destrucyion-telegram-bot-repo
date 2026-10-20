@@ -1,20 +1,27 @@
-"""Save a permitted Telegram channel/group post using the user's own MTProto session.
+"""Save permitted Telegram channel/group media using the user's own MTProto session.
 
-Only normal, accessible media is supported. Protected-content and timed/view-once
-messages are intentionally rejected; this service does not bypass Telegram controls.
+This follows the Telethon-based flow used by Self-Destructing-Media-Downloader:
+parse a post URL, resolve the peer, fetch the message, and download its media.
+Telegram content-protection and timed/view-once controls are intentionally respected.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Awaitable, Callable, TypeVar
 from urllib.parse import urlparse
 
 from telethon import TelegramClient
-from telethon.tl.types import PeerChannel
+from telethon.errors import FloodWaitError
+from telethon.tl.types import MessageMediaDocument, MessageMediaPaidMedia, MessageMediaPhoto, PeerChannel
 
 MAX_SAVE_BYTES = 45 * 1024 * 1024
+MAX_AUTOMATIC_FLOOD_WAIT_SECONDS = 300
+MAX_FLOOD_WAIT_RETRIES = 3
 _TME_HOSTS = {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}
+T = TypeVar("T")
 
 
 class SaveLinkError(ValueError):
@@ -29,14 +36,34 @@ class SaveResult:
     source_title: str
 
 
+async def _with_floodwait_retry(operation: Callable[[], Awaitable[T]]) -> T:
+    """Retry a Telethon operation after short FloodWait responses."""
+    retries = 0
+    while True:
+        try:
+            return await operation()
+        except FloodWaitError as exc:
+            retries += 1
+            if retries > MAX_FLOOD_WAIT_RETRIES or exc.seconds > MAX_AUTOMATIC_FLOOD_WAIT_SECONDS:
+                raise SaveLinkError(
+                    f"Telegram meminta jeda {exc.seconds} detik. "
+                    "Demi menghindari permintaan berulang, coba lagi setelah jeda tersebut."
+                ) from exc
+            await asyncio.sleep(exc.seconds + 1)
+
+
 def parse_telegram_post_link(link: str) -> tuple[str | int, int, bool]:
     """Return (entity, message_id, is_private_link) for supported t.me post URLs."""
     parsed = urlparse(link.strip())
     if parsed.scheme not in {"https", "http"} or (parsed.hostname or "").lower() not in _TME_HOSTS:
-        raise SaveLinkError("Kirim tautan posting Telegram yang valid, misalnya https://t.me/channel/123.")
+        raise SaveLinkError(
+            "Kirim tautan posting Telegram yang valid, misalnya https://t.me/channel/123."
+        )
+
     parts = [part for part in parsed.path.split("/") if part]
     if parts and parts[0] == "s":
         parts = parts[1:]
+
     if len(parts) == 3 and parts[0] == "c":
         try:
             channel_id, message_id = int(parts[1]), int(parts[2])
@@ -45,6 +72,7 @@ def parse_telegram_post_link(link: str) -> tuple[str | int, int, bool]:
         if channel_id <= 0 or message_id <= 0:
             raise SaveLinkError("ID channel atau posting tidak valid.")
         return channel_id, message_id, True
+
     if len(parts) == 2 and re.fullmatch(r"[A-Za-z0-9_]{4,}", parts[0]):
         try:
             message_id = int(parts[1])
@@ -53,6 +81,7 @@ def parse_telegram_post_link(link: str) -> tuple[str | int, int, bool]:
         if message_id <= 0:
             raise SaveLinkError("ID posting tidak valid.")
         return parts[0], message_id, False
+
     raise SaveLinkError("Tautan harus menuju satu posting, bukan halaman undangan atau profil.")
 
 
@@ -61,31 +90,43 @@ async def download_post_media(
     link: str,
     destination: Path,
 ) -> SaveResult:
-    """Download one ordinary media post visible to the authenticated account."""
-    from telethon.errors import FloodWaitError
-    from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaPaidMedia
+    """Download one ordinary media post visible and permitted to the authenticated account."""
+    from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, MessageIdInvalidError
+    from telethon.tl.types import MessageMediaWebPage
 
+    entity_ref, message_id, is_private = parse_telegram_post_link(link)
     try:
-        entity_ref, message_id, is_private = parse_telegram_post_link(link)
-        entity = await client.get_entity(PeerChannel(entity_ref) if is_private else entity_ref)
-        message = await client.get_messages(entity, ids=message_id)
+        entity = await _with_floodwait_retry(
+            lambda: client.get_entity(PeerChannel(entity_ref) if is_private else entity_ref)
+        )
+        message = await _with_floodwait_retry(lambda: client.get_messages(entity, ids=message_id))
     except SaveLinkError:
         raise
-    except FloodWaitError as exc:
-        raise SaveLinkError(f"Telegram meminta jeda {exc.seconds} detik. Coba lagi nanti.") from exc
+    except (ChannelPrivateError, ChatAdminRequiredError) as exc:
+        raise SaveLinkError(
+            "Akun Telegram yang terhubung tidak memiliki akses ke posting ini. "
+            "Pastikan akun sudah bergabung dengan channel/grup privat."
+        ) from exc
+    except MessageIdInvalidError as exc:
+        raise SaveLinkError("ID posting tidak valid atau posting sudah tidak tersedia.") from exc
     except Exception as exc:
         raise SaveLinkError(
-            "Posting tidak dapat diakses oleh akun Telegram yang terhubung. "
-            "Pastikan akun tersebut sudah bergabung dengan channel privat dan tautannya benar."
+            "Posting tidak dapat diakses. Periksa tautan dan pastikan akun yang terhubung "
+            "bisa membuka posting tersebut di Telegram."
         ) from exc
 
     if not message:
         raise SaveLinkError("Posting tidak ditemukan atau sudah dihapus.")
+
     if getattr(message, "noforwards", False) or getattr(entity, "noforwards", False):
-        raise SaveLinkError("Posting ini memakai proteksi konten Telegram dan tidak dapat disimpan lewat fitur ini.")
+        raise SaveLinkError(
+            "Posting ini memakai proteksi konten Telegram. Fitur /save tidak dapat "
+            "menyimpan posting yang proteksinya melarang penyimpanan."
+        )
+
     media = getattr(message, "media", None)
-    if media is None:
-        raise SaveLinkError("Posting ini tidak berisi media yang didukung.")
+    if media is None or isinstance(media, MessageMediaWebPage):
+        raise SaveLinkError("Posting ini tidak berisi media langsung yang didukung.")
     if getattr(message, "ttl_period", None) or getattr(media, "ttl_seconds", None):
         raise SaveLinkError("Media sementara/view-once tidak didukung oleh fitur /save.")
     if isinstance(media, MessageMediaPaidMedia) or "PaidMedia" in type(media).__name__:
@@ -95,11 +136,19 @@ async def download_post_media(
 
     destination.mkdir(parents=True, exist_ok=True)
     try:
-        downloaded = await client.download_media(message, file=str(destination))
+        downloaded = await _with_floodwait_retry(
+            lambda: client.download_media(message, file=str(destination))
+        )
+    except SaveLinkError:
+        raise
     except Exception as exc:
-        raise SaveLinkError("Telegram gagal mengunduh media. Coba lagi nanti.") from exc
+        raise SaveLinkError(
+            "Telegram gagal mengunduh media. Pastikan media masih tersedia dan coba lagi."
+        ) from exc
+
     if not downloaded:
-        raise SaveLinkError("Telegram tidak mengembalikan file media.")
+        raise SaveLinkError("Telethon tidak mengembalikan file media untuk posting ini.")
+
     path = Path(downloaded)
     try:
         size = path.stat().st_size
