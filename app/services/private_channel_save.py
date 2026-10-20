@@ -14,8 +14,12 @@ from typing import Awaitable, Callable, TypeVar
 from urllib.parse import urlparse
 
 from telethon import TelegramClient
+
+from app.core.logging import get_logger
 from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaDocument, MessageMediaPaidMedia, MessageMediaPhoto, PeerChannel
+
+log = get_logger(__name__)
 
 MAX_SAVE_BYTES = 45 * 1024 * 1024
 MAX_AUTOMATIC_FLOOD_WAIT_SECONDS = 300
@@ -116,12 +120,31 @@ async def download_post_media(
         ) from exc
 
     if not message:
+        log.warning("save_post_not_found", message_id=message_id, is_private_link=is_private)
         raise SaveLinkError("Posting tidak ditemukan atau sudah dihapus.")
 
-    if getattr(message, "noforwards", False) or getattr(entity, "noforwards", False):
+    message_protected = bool(getattr(message, "noforwards", False))
+    entity_protected = bool(getattr(entity, "noforwards", False))
+    log.info(
+        "save_post_access_checked",
+        message_id=message_id,
+        is_private_link=is_private,
+        has_media=bool(getattr(message, "media", None)),
+        message_protected=message_protected,
+        entity_protected=entity_protected,
+    )
+    if message_protected or entity_protected:
+        log.warning(
+            "save_post_blocked_content_protection",
+            message_id=message_id,
+            is_private_link=is_private,
+            message_protected=message_protected,
+            entity_protected=entity_protected,
+        )
         raise SaveLinkError(
             "Posting ini memakai proteksi konten Telegram. Fitur /save tidak dapat "
-            "menyimpan posting yang proteksinya melarang penyimpanan."
+            "menyimpan posting yang proteksinya melarang penyimpanan. Periksa pengaturan "
+            "'Restrict Saving Content' atau pilih posting yang mengizinkan penyimpanan."
         )
 
     media = getattr(message, "media", None)
@@ -135,6 +158,12 @@ async def download_post_media(
         raise SaveLinkError("Jenis media pada posting ini belum didukung.")
 
     destination.mkdir(parents=True, exist_ok=True)
+    log.info(
+        "save_media_download_started",
+        message_id=message_id,
+        is_private_link=is_private,
+        media_kind="photo" if isinstance(media, MessageMediaPhoto) else "document",
+    )
     try:
         downloaded = await _with_floodwait_retry(
             lambda: client.download_media(message, file=str(destination))
@@ -142,6 +171,12 @@ async def download_post_media(
     except SaveLinkError:
         raise
     except Exception as exc:
+        log.exception(
+            "save_media_download_failed",
+            message_id=message_id,
+            is_private_link=is_private,
+            error_type=type(exc).__name__,
+        )
         raise SaveLinkError(
             "Telegram gagal mengunduh media. Pastikan media masih tersedia dan coba lagi."
         ) from exc
@@ -160,6 +195,13 @@ async def download_post_media(
     if size > MAX_SAVE_BYTES:
         path.unlink(missing_ok=True)
         raise SaveLinkError("Ukuran media melebihi batas aman 45 MiB untuk pengiriman melalui bot.")
+
+    log.info(
+        "save_media_download_completed",
+        message_id=message_id,
+        is_private_link=is_private,
+        file_size_bytes=size,
+    )
 
     kind = "photo" if isinstance(media, MessageMediaPhoto) else "document"
     if isinstance(media, MessageMediaDocument):
