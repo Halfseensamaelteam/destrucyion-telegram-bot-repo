@@ -206,6 +206,17 @@ async def _process_message(
 
     Returns one of: "ignored", "saved", "duplicate", "failed".
     """
+    # Respect Telegram's content-protection flag before any capture/download.
+    # This mirrors the /save command's guard and prevents the event worker from
+    # re-uploading media from chats/posts that explicitly disable saving.
+    if getattr(message, "noforwards", False):
+        log.info(
+            "media_capture_skipped_content_protected",
+            account_id=account_id,
+            message_id=getattr(message, "id", None),
+        )
+        return "ignored"
+
     # Step 1-2: classify (pure, no network)
     media_info = classify_message(message)
     if media_info is None:
