@@ -1,4 +1,4 @@
-"""User command to save one permitted media post from Telegram by link."""
+"""User command to save one permitted media post to the connected account's Saved Messages."""
 from __future__ import annotations
 
 import shutil
@@ -28,7 +28,7 @@ async def save_command(
     session: AsyncSession,
     user: User,
 ) -> None:
-    """Handle /save <t.me/channel/message> with this user's connected account."""
+    """Handle /save <t.me/channel/message> and save media to Telegram Saved Messages."""
     message = update.effective_message
     if message is None:
         return
@@ -36,7 +36,8 @@ async def save_command(
         await message.reply_text(
             "Gunakan format:\n/save https://t.me/channel/123\n\n"
             "Untuk channel privat, salin tautan posting (Copy Link) dari Telegram. "
-            "Akun yang terhubung harus sudah menjadi anggota channel tersebut."
+            "Akun yang terhubung harus sudah menjadi anggota channel tersebut. "
+            "Media yang proteksinya melarang penyimpanan tidak dapat disimpan."
         )
         return
 
@@ -49,13 +50,15 @@ async def save_command(
         await message.reply_text("Session Telegram tidak tersedia. Jalankan /connect kembali.")
         return
 
-    await message.reply_text("⏳ Memeriksa akses posting dan mengunduh media…")
+    status_message = await message.reply_text(
+        "⏳ Memeriksa akses posting dan menyimpan media ke Pesan Tersimpan akun Telegram yang terhubung…"
+    )
     account_service = AccountService(session)
     try:
         string_session = await account_service.load_session(account.id, user.id)
         api_id, api_hash = account_service.get_account_api_credentials(account)
     except SessionError:
-        await message.reply_text("Session tidak dapat dibuka. Jalankan /connect kembali.")
+        await status_message.edit_text("Session tidak dapat dibuka. Jalankan /connect kembali.")
         return
 
     temp_dir = Path(tempfile.mkdtemp(prefix="viserbot-save-"))
@@ -63,22 +66,27 @@ async def save_command(
     try:
         await client.connect()
         if not await client.is_user_authorized():
-            await message.reply_text("Session Telegram sudah tidak valid. Jalankan /connect kembali.")
+            await status_message.edit_text("Session Telegram sudah tidak valid. Jalankan /connect kembali.")
             return
+
         result = await download_post_media(client, context.args[0], temp_dir)
-        caption = f"✅ Media berhasil disimpan dari: {result.source_title}"
-        with result.path.open("rb") as media_file:
-            if result.media_kind == "photo":
-                await message.reply_photo(photo=media_file, caption=caption)
-            elif result.media_kind == "video":
-                await message.reply_video(video=media_file, caption=caption)
-            else:
-                await message.reply_document(document=media_file, caption=caption)
+        # Send with the authenticated user's MTProto client, not the Bot API.
+        # "me" is Telegram Saved Messages for this connected user account.
+        await client.send_file(
+            "me",
+            str(result.path),
+            caption=f"Disimpan melalui /save dari: {result.source_title}",
+        )
+        await status_message.edit_text(
+            "✅ Media berhasil disimpan ke Pesan Tersimpan (Saved Messages) akun Telegram yang terhubung."
+        )
     except SaveLinkError as exc:
-        await message.reply_text(f"⚠️ {exc}")
+        await status_message.edit_text(f"⚠️ {exc}")
     except Exception:
         log.exception("save_command_failed", user_id=user.id, account_id=account.id)
-        await message.reply_text("❌ Gagal menyimpan media karena terjadi kesalahan. Coba lagi nanti.")
+        await status_message.edit_text(
+            "❌ Gagal menyimpan media ke Pesan Tersimpan. Periksa log aplikasi untuk detail, lalu coba lagi."
+        )
     finally:
         if client.is_connected():
             await client.disconnect()
