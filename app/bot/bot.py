@@ -1,5 +1,4 @@
-"""
-app.bot.bot
+"""app.bot.bot
 ~~~~~~~~~~~
 Telegram Bot application factory using python-telegram-bot.
 """
@@ -18,6 +17,7 @@ from telegram.ext import (
 
 from app.core.config import get_settings
 from app.bot.handlers.start import start_command, help_command, status_command
+from app.bot.handlers.save import save_command
 from app.bot.handlers.account import (
     accounts_command,
     connect_start,
@@ -45,13 +45,10 @@ def create_bot_app() -> Application:
     token = settings.bot_token.get_secret_value()
 
     if not token:
-        # Prevent crash during tests or when bot token is not yet configured.
-        # It won't be able to run, but it can be constructed.
         token = "123456789:dummy-token-for-tests"
 
     import os
     os.makedirs("data", exist_ok=True)
-    # Use PicklePersistence so conversation states survive bot restarts
     persistence = PicklePersistence(filepath="data/bot_persistence.pickle")
     
     application = (
@@ -61,16 +58,14 @@ def create_bot_app() -> Application:
         .build()
     )
 
-    # Membership checks run before all application commands and callbacks.
     application.add_handler(CallbackQueryHandler(check_channel_membership, pattern="^check_channel_membership$"), group=-3)
     application.add_handler(TypeHandler(Update, channel_membership_gate), group=-2)
 
-    # Basic Commands
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("status", status_command))
-    
-    # Subscription
+    application.add_handler(CommandHandler("save", save_command))
+
     application.add_handler(CommandHandler("subscription", subscription_command))
     application.add_handler(
         CallbackQueryHandler(
@@ -79,26 +74,17 @@ def create_bot_app() -> Application:
         )
     )
 
-    # Admin
     application.add_handler(CommandHandler("admin", admin_command))
-
-    # Accounts / Disconnect
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("disconnect", disconnect_command))
     application.add_handler(CommandHandler("connectphone", connect_phone_command))
     application.add_handler(CallbackQueryHandler(disconnect_callback, pattern="^disconnect_"))
 
-    # 2FA password capture for in-progress QR logins (CLAUDE.md §12.1/§12.2).
-    # Registered in an EARLIER group (-1, default group is 0) so it gets
-    # first refusal on plain-text messages while a QR login for that chat
-    # is awaiting a password. Raises ApplicationHandlerStop to consume the
-    # update when it matches; does nothing otherwise.
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, maybe_capture_2fa_password),
         group=-1,
     )
 
-    # Connect Conversation Flow (QR Code Authentication)
     connect_handler = ConversationHandler(
         entry_points=[CommandHandler("connect", connect_start)],
         states={
@@ -116,15 +102,7 @@ def create_bot_app() -> Application:
         fallbacks=[CommandHandler("cancel", connect_cancel)],
         name="connect_conversation",
         persistent=True,
-        # CRITICAL: without this, a user who starts /connect and abandons it
-        # mid-way (without /cancel) gets permanently stuck — PTB treats them
-        # as "already in a conversation" and /connect stops matching the
-        # entry point at all, silently dropping every future /connect from
-        # that user with NO error and NO log line. allow_reentry=True lets
-        # /connect always restart the flow regardless of current state.
         allow_reentry=True,
-        # Auto-expire an abandoned attempt after 10 minutes rather than
-        # leaving it stuck forever, matching the QR login's own time budget.
         conversation_timeout=600,
     )
     application.add_handler(connect_handler)
@@ -133,18 +111,12 @@ def create_bot_app() -> Application:
 
 
 async def setup_webhook(application: Application, webhook_url: str) -> None:
-    """Set up the Telegram bot webhook.
-    
-    Phase 18: Configure webhook for Vercel deployment.
-    """
+    """Set up the Telegram Bot webhook."""
     await application.bot.set_webhook(url=webhook_url)
     print(f"Webhook set to: {webhook_url}")
 
 
 async def delete_webhook(application: Application) -> None:
-    """Delete the Telegram bot webhook.
-    
-    Phase 18: Clean up webhook when switching to long polling.
-    """
+    """Delete webhook when switching to long polling."""
     await application.bot.delete_webhook()
     print("Webhook deleted")
