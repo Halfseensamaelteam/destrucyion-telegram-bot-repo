@@ -32,6 +32,7 @@ async def save_command(
     message = update.effective_message
     if message is None:
         return
+    log.info("save_command_started", user_id=user.id, argument_count=len(context.args or []))
     if not context.args or len(context.args) != 1:
         await message.reply_text(
             "Gunakan format:\n/save https://t.me/channel/123\n\n"
@@ -62,6 +63,7 @@ async def save_command(
         return
 
     temp_dir = Path(tempfile.mkdtemp(prefix="viserbot-save-"))
+    log.info("save_session_loaded", user_id=user.id, account_id=account.id)
     client = TelegramClient(string_session, api_id, api_hash)
     try:
         await client.connect()
@@ -70,6 +72,13 @@ async def save_command(
             return
 
         result = await download_post_media(client, context.args[0], temp_dir)
+        log.info(
+            "save_saved_messages_upload_started",
+            user_id=user.id,
+            account_id=account.id,
+            media_kind=result.media_kind,
+            file_size_bytes=result.path.stat().st_size,
+        )
         # Send with the authenticated user's MTProto client, not the Bot API.
         # "me" is Telegram Saved Messages for this connected user account.
         await client.send_file(
@@ -77,10 +86,22 @@ async def save_command(
             str(result.path),
             caption=f"Disimpan melalui /save dari: {result.source_title}",
         )
+        log.info(
+            "save_saved_messages_upload_completed",
+            user_id=user.id,
+            account_id=account.id,
+            media_kind=result.media_kind,
+        )
         await status_message.edit_text(
             "✅ Media berhasil disimpan ke Pesan Tersimpan (Saved Messages) akun Telegram yang terhubung."
         )
     except SaveLinkError as exc:
+        log.warning(
+            "save_command_rejected",
+            user_id=user.id,
+            account_id=account.id,
+            reason=str(exc),
+        )
         await status_message.edit_text(f"⚠️ {exc}")
     except Exception:
         log.exception("save_command_failed", user_id=user.id, account_id=account.id)
