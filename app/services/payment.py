@@ -141,6 +141,14 @@ class PaymentService:
 
         payment = await self.payment_repo.get_by_order_id(order_id)
 
+        if payment is None and "-" in order_id:
+            parts = order_id.rsplit("-", 1)
+            if parts[1].isdigit():
+                prefix = parts[0]
+                payment = await self.payment_repo.get_by_order_id(prefix)
+                if payment is None:
+                    payment = await self.payment_repo.get_by_order_id_prefix(prefix)
+
         if payment is None:
             raise ValueError(
                 f"Payment not found for order_id: {order_id}"

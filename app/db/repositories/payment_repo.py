@@ -64,6 +64,24 @@ class PaymentRepository:
 
         return result.scalar_one_or_none()
 
+    async def get_by_order_id_prefix(
+        self,
+        order_id_prefix: str,
+    ) -> Payment | None:
+        """Get a payment by order ID prefix (LIKE match).
+
+        Midtrans Payment Link appends a timestamp suffix to the order_id
+        in webhook notifications (e.g. 'PL-3-W-ABCD12345678-1792453088812').
+        This method finds the original record by its stored prefix.
+        """
+        from sqlalchemy import String
+        result = await self.session.execute(
+            select(Payment).where(
+                Payment.order_id.cast(String).like(f"{order_id_prefix}%"),
+            )
+        )
+        return result.scalars().first()
+
     async def get_by_transaction_id(
         self,
         transaction_id: str,

@@ -92,6 +92,17 @@ async def midtrans_notification(request: Request) -> dict:
         payment_repo = PaymentRepository(session)
         payment = await payment_repo.get_by_order_id(order_id)
 
+        # Fallback: Midtrans Payment Link webhooks append a timestamp suffix
+        # to the original order_id (e.g. 'PL-3-W-ABCD12-1792453088812').
+        # Strip the suffix and retry with direct prefix match, then LIKE match.
+        if payment is None and "-" in order_id:
+            parts = order_id.rsplit("-", 1)
+            if parts[1].isdigit():
+                prefix = parts[0]
+                payment = await payment_repo.get_by_order_id(prefix)
+                if payment is None:
+                    payment = await payment_repo.get_by_order_id_prefix(prefix)
+
         if payment is None:
             raise HTTPException(
                 status_code=404,
@@ -111,7 +122,7 @@ async def midtrans_notification(request: Request) -> dict:
         payment_service = PaymentService(session)
 
         payment, subscription = await payment_service.process_notification(
-            order_id=order_id,
+            order_id=payment.order_id,
             transaction_id=transaction_id,
             status=payment_status,
         )

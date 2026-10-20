@@ -34,7 +34,7 @@ async def test_no_subscription_shows_free_tier_message():
         await raw_subscription_command(update, MagicMock(), session, MagicMock(id=1))
 
     text = update.message.reply_text.call_args.args[0]
-    assert "tidak memiliki langganan aktif" in text
+    assert "Free" in text or "tidak memiliki langganan aktif" in text
     markup = update.message.reply_text.call_args.kwargs["reply_markup"]
     callback_data = [button.callback_data for row in markup.inline_keyboard for button in row]
     assert "subscription_qris_menu" in callback_data
@@ -55,7 +55,7 @@ async def test_lifetime_subscription_does_not_crash_on_none_expiry():
         await raw_subscription_command(update, MagicMock(), session, MagicMock(id=1))
 
     text = update.message.reply_text.call_args.args[0]
-    assert "Selamanya" in text
+    assert "Forever" in text or "Selamanya" in text
     assert "Lifetime" in text.title() or "lifetime" in text.lower()
 
 

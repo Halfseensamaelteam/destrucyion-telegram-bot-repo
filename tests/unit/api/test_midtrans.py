@@ -133,3 +133,51 @@ async def test_webhook_amount_mismatch_returns_400(api_client):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Payment amount mismatch."
+
+
+async def test_webhook_payment_link_with_suffix_resolves_payment(api_client):
+    stored_order_id = "PL-3-W-454167FAA1DF"
+    webhook_order_id = f"{stored_order_id}-1792453088812"
+    payload = make_payload(order_id=webhook_order_id, gross_amount="30000", transaction_status="settlement")
+
+    payment = MagicMock()
+    payment.order_id = stored_order_id
+    payment.amount = 30000
+    payment.user_id = 3
+    payment.status = MagicMock()
+
+    subscription = MagicMock()
+    subscription.expires_at = None
+
+    with patch(
+        "app.api.routes.midtrans.PaymentRepository"
+    ) as mock_repo, patch(
+        "app.api.routes.midtrans.PaymentService"
+    ) as mock_service, patch(
+        "app.api.routes.midtrans.UserRepository"
+    ) as mock_user_repo, patch(
+        "app.api.routes.midtrans.TelegramNotifier"
+    ) as mock_notifier:
+        mock_notifier.return_value.send_subscription_activated = AsyncMock()
+        mock_repo.return_value.get_by_order_id = AsyncMock(
+            side_effect=lambda oid: payment if oid == stored_order_id else None
+        )
+        mock_repo.return_value.get_by_order_id_prefix = AsyncMock(
+            return_value=payment
+        )
+        mock_service.return_value.process_notification = AsyncMock(
+            return_value=(payment, subscription)
+        )
+        mock_user_repo.return_value.get_by_id = AsyncMock(
+            return_value=MagicMock(telegram_user_id=123456)
+        )
+
+        response = await api_client.post(
+            "/api/v1/midtrans/notification",
+            json=payload,
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    mock_service.return_value.process_notification.assert_awaited_once()
+    assert mock_service.return_value.process_notification.call_args.kwargs["order_id"] == stored_order_id
