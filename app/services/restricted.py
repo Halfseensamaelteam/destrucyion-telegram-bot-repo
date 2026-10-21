@@ -204,50 +204,108 @@ class LinkRequestProcessor:
         *,
         process_message: ProcessMessageFn,
         poll_interval: float | None = None,
+        max_concurrency: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._manager = manager
         self._process_message = process_message
-        if poll_interval is None:
-            from app.core.config import get_settings
+        from app.core.config import get_settings
 
-            poll_interval = get_settings().link_request_poll_seconds
+        settings = get_settings()
+        if poll_interval is None:
+            poll_interval = settings.link_request_poll_seconds
         self._poll_interval = poll_interval
+        if max_concurrency is None:
+            max_concurrency = settings.link_request_max_concurrency
+        self._max_concurrency = max(1, max_concurrency)
+        self._stale_seconds = settings.link_request_stale_seconds
+        self._semaphore = asyncio.Semaphore(self._max_concurrency)
+        # One in-flight request per account: a Telethon client serves its
+        # owner's saves one at a time (sequential per account also keeps
+        # Saved Messages ordering sane), while DIFFERENT accounts proceed
+        # fully in parallel up to the global cap.
+        self._account_locks: dict[int, asyncio.Lock] = {}
 
     async def run_forever(self) -> None:
         """Poll until cancelled (worker shutdown cancels this task)."""
-        log.info("link_request_processor_started", interval=self._poll_interval)
-        # A previous run may have died mid-request, leaving rows stuck in
-        # PROCESSING forever — return them to the queue before polling.
+        log.info(
+            "link_request_processor_started",
+            interval=self._poll_interval,
+            max_concurrency=self._max_concurrency,
+        )
+        while True:
+            try:
+                # Requeue rows whose worker died mid-request. Age-boxed:
+                # with several workers running, a live peer's in-flight
+                # rows are never stolen — only claims older than the
+                # stale threshold come back.
+                await self._reset_stale()
+                processed = await self.process_pending_once()
+            except Exception as exc:  # one bad cycle must never kill the loop
+                log.error("link_request_cycle_failed", error=str(exc))
+                processed = 0
+            # A full batch means more work is likely waiting — loop
+            # immediately instead of sleeping the whole poll interval.
+            if processed < self._max_concurrency:
+                await asyncio.sleep(self._poll_interval)
+
+    async def _reset_stale(self) -> None:
         try:
             from app.db.repositories.link_request_repo import LinkRequestRepository
 
             async with self._session_factory() as session:
                 repo = LinkRequestRepository(session)
-                reset = await repo.reset_processing_to_pending()
+                reset = await repo.reset_processing_to_pending(
+                    older_than_seconds=self._stale_seconds
+                )
                 if reset:
                     await session.commit()
                     log.info("link_requests_stale_reset", count=reset)
-        except Exception as exc:  # never block startup on the reset
+        except Exception as exc:  # housekeeping must never block the queue
             log.warning("link_requests_stale_reset_failed", error=str(exc))
-        while True:
-            try:
-                await self.process_pending_once()
-            except Exception as exc:  # one bad cycle must never kill the loop
-                log.error("link_request_cycle_failed", error=str(exc))
-            await asyncio.sleep(self._poll_interval)
 
     async def process_pending_once(self) -> int:
-        """Process every currently-pending request once. Returns count."""
+        """Claim one batch atomically and process it concurrently.
+
+        Claiming (PENDING -> PROCESSING in a single UPDATE) is what
+        makes several worker processes safe against one queue: no row
+        can be handed to two workers. Within the batch, requests run
+        concurrently up to the configured cap. Returns the batch size.
+        """
         from app.db.repositories.link_request_repo import LinkRequestRepository
 
         async with self._session_factory() as session:
             repo = LinkRequestRepository(session)
-            pending = await repo.list_pending(limit=50)
+            claimed = await repo.claim_pending(limit=self._max_concurrency)
+            for row in claimed:
+                # Keep loaded attributes usable after the session closes
+                # (commit would otherwise expire them).
+                session.expunge(row)
+            await session.commit()
 
-        for request in pending:
-            await self._process_request(request)
-        return len(pending)
+        if claimed:
+            await asyncio.gather(
+                *(self._run_one(request) for request in claimed)
+            )
+        return len(claimed)
+
+    async def _run_one(self, request) -> None:
+        async with self._semaphore:
+            lock = self._account_locks.setdefault(
+                request.telegram_account_id, asyncio.Lock()
+            )
+            async with lock:
+                try:
+                    await self._process_request(request)
+                except Exception as exc:
+                    # _process_request handles its own failures (marks
+                    # the row FAILED); anything escaping to here is a
+                    # bookkeeping failure — log it, never kill the batch.
+                    log.error(
+                        "link_request_unhandled_error",
+                        request_id=request.id,
+                        error=str(exc),
+                    )
 
     async def _process_request(self, request) -> None:
         from app.db.models.link_request import LinkRequestStatus
