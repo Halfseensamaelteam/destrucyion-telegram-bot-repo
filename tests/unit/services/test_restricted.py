@@ -181,6 +181,94 @@ async def test_processor_poll_interval_defaults_to_settings(db_session):
     assert processor._poll_interval == 3.0
 
 
+async def test_claim_pending_is_atomic_and_disjoint(db_session, user, account):
+    """Claiming flips rows to PROCESSING in one statement: a second
+    claim (e.g. another worker process) can never receive the same rows."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+
+    repo = LinkRequestRepository(db_session)
+    ids = []
+    for i in range(3):
+        row = await repo.create(
+            user_id=user.id,
+            telegram_account_id=account.id,
+            raw_link=f"https://t.me/chan/{i + 1}",
+        )
+        ids.append(row.id)
+    await db_session.commit()
+
+    first = await repo.claim_pending(limit=2)
+    assert [row.id for row in first] == ids[:2]  # oldest first
+    assert all(row.status == LinkRequestStatus.PROCESSING for row in first)
+    assert all(row.processed_at is not None for row in first)  # claim stamp
+    await db_session.commit()
+
+    second = await repo.claim_pending(limit=2)
+    assert [row.id for row in second] == ids[2:]
+    await db_session.commit()
+
+    assert await repo.claim_pending(limit=2) == []
+
+
+def _make_run_tracker():
+    """A stand-in for _process_request that records temporal overlap.
+
+    The concurrency machinery under test is _run_one (global semaphore +
+    per-account lock); the real _process_request's DB path is covered by
+    the other processor tests. True concurrent DB sessions cannot run on
+    the single-connection in-memory SQLite test DB — the atomic claim
+    itself is verified against real PostgreSQL separately.
+    """
+    import asyncio as _asyncio
+    from types import SimpleNamespace
+
+    state = {"active": 0, "max_active": 0}
+
+    async def run_one(request):
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        await _asyncio.sleep(0.05)
+        state["active"] -= 1
+
+    def fake_request(request_id, account_id):
+        return SimpleNamespace(id=request_id, telegram_account_id=account_id)
+
+    return run_one, state, fake_request
+
+
+async def test_processor_runs_different_accounts_concurrently(db_session, user, account):
+    """The scaling fix: one account's save no longer blocks another's."""
+    import asyncio as _asyncio
+
+    run_one, state, fake_request = _make_run_tracker()
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(factory, MagicMock(), process_message=AsyncMock())
+    processor._process_request = run_one
+
+    await _asyncio.gather(
+        processor._run_one(fake_request(1, account.id)),
+        processor._run_one(fake_request(2, account.id + 1000)),
+    )
+    assert state["max_active"] == 2  # actually overlapped in time
+
+
+async def test_processor_serializes_the_same_account(db_session, user, account):
+    """Per-account cap of 1: one client's saves stay sequential."""
+    import asyncio as _asyncio
+
+    run_one, state, fake_request = _make_run_tracker()
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(factory, MagicMock(), process_message=AsyncMock())
+    processor._process_request = run_one
+
+    await _asyncio.gather(
+        processor._run_one(fake_request(1, account.id)),
+        processor._run_one(fake_request(2, account.id)),
+    )
+    assert state["max_active"] == 1
+
+
 async def test_stale_processing_requests_are_reset(db_session, user, account):
     """A request left in PROCESSING by a stopped worker must return to
     PENDING at startup, or it would never be retried."""

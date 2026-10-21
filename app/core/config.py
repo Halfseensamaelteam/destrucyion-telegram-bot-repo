@@ -169,6 +169,24 @@ class Settings(BaseSettings):
             "so keep it small; the check is one indexed SELECT."
         ),
     )
+    link_request_max_concurrency: int = Field(
+        default=10,
+        description=(
+            "Maximum link requests processed at the same time (one per "
+            "account at most). Without a cap, one user's huge video "
+            "blocks every other user's saves behind it; with claiming, "
+            "several worker processes can also share the queue, each "
+            "running up to this many."
+        ),
+    )
+    link_request_stale_seconds: float = Field(
+        default=600.0,
+        description=(
+            "A claimed (PROCESSING) link request older than this is "
+            "considered abandoned (its worker died) and is requeued. "
+            "Must exceed the longest legitimate save duration."
+        ),
+    )
     display_timezone: str = Field(
         default="UTC",
         description=(

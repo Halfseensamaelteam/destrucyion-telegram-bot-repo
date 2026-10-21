@@ -42,7 +42,7 @@ Content) use — adapted here to this project's multi-tenant architecture:
 ```
 
 Sending a bare `t.me` link as a plain message works the same. The bot
-replies "Queued"; the worker fetches it (usually within ~15 s) and the copy
+replies "Queued"; the worker fetches it (usually within ~3 s) and the copy
 appears in **your Saved Messages**, with a confirmation back in the bot chat.
 
 ### 2. From your own Saved Messages (no bot round-trip)
@@ -90,6 +90,22 @@ arrival is the only reliable moment.
 | `RESTRICTED_TRIGGER` | `.get` | Saved-Messages link command (empty disables) |
 | `RESTRICTED_MAX_BATCH` | `20` | Max posts per link/range request |
 | `RESTRICTED_BATCH_DELAY_SECONDS` | `2` | Pause between range items |
+| `LINK_REQUEST_POLL_SECONDS` | `3` | Worker queue poll interval |
+| `LINK_REQUEST_MAX_CONCURRENCY` | `10` | Link requests processed at once (max 1 per account) |
+| `LINK_REQUEST_STALE_SECONDS` | `600` | A claimed request older than this is requeued as abandoned |
+
+## Concurrency & multiple workers
+
+The processor claims each batch atomically — one
+`UPDATE … WHERE status = PENDING … RETURNING` flips rows to PROCESSING —
+so several worker processes/containers can drain the same queue without
+ever receiving the same request twice (verified on PostgreSQL with two
+concurrent claimers). Within a batch, requests run concurrently up to
+`LINK_REQUEST_MAX_CONCURRENCY`, with at most one in-flight request per
+account. A worker that dies mid-request leaves its claims behind; once a
+claim is older than `LINK_REQUEST_STALE_SECONDS` it is requeued
+automatically (a live worker's in-flight requests are never stolen,
+because only claims older than the threshold are touched).
 
 ## Implementation map
 
