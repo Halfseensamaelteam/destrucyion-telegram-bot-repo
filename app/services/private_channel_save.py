@@ -89,6 +89,34 @@ def parse_telegram_post_link(link: str) -> tuple[str | int, int, bool]:
     raise SaveLinkError("Tautan harus menuju satu posting, bukan halaman undangan atau profil.")
 
 
+async def _resolve_post_entity(client: TelegramClient, entity_ref: str | int, is_private: bool):
+    """Resolve a post's chat using the authenticated account's existing Telegram access.
+
+    Private t.me/c links contain a channel ID but not its access hash. Telethon can
+    resolve PeerChannel directly when the entity is cached; if it is not cached,
+    inspect dialogs already visible to this account. This never joins chats or
+    bypasses membership/content restrictions.
+    """
+    if not is_private:
+        return await client.get_entity(entity_ref)
+
+    channel_id = int(entity_ref)
+    try:
+        return await client.get_entity(PeerChannel(channel_id))
+    except ValueError:
+        # The account may be a member but this channel's access hash is not in
+        # Telethon's entity cache yet. Dialogs provide the entity/access hash.
+        async for dialog in client.iter_dialogs():
+            candidate = getattr(dialog, "entity", None)
+            if getattr(candidate, "id", None) == channel_id:
+                return candidate
+
+        raise SaveLinkError(
+            "Channel privat tidak ditemukan di daftar chat akun yang terhubung. "
+            "Pastikan akun tersebut sudah bergabung dan dapat membuka channel di Telegram."
+        )
+
+
 async def download_post_media(
     client: TelegramClient,
     link: str,
@@ -101,7 +129,7 @@ async def download_post_media(
     entity_ref, message_id, is_private = parse_telegram_post_link(link)
     try:
         entity = await _with_floodwait_retry(
-            lambda: client.get_entity(PeerChannel(entity_ref) if is_private else entity_ref)
+            lambda: _resolve_post_entity(client, entity_ref, is_private)
         )
         message = await _with_floodwait_retry(lambda: client.get_messages(entity, ids=message_id))
     except SaveLinkError:
