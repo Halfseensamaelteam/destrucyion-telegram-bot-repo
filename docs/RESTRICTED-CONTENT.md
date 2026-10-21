@@ -107,6 +107,20 @@ claim is older than `LINK_REQUEST_STALE_SECONDS` it is requeued
 automatically (a live worker's in-flight requests are never stolen,
 because only claims older than the threshold are touched).
 
+### Adaptive concurrency (memory budget)
+
+A fixed slot count is a blunt instrument: it cannot tell small files
+from huge ones. Setting `LINK_REQUEST_MEMORY_BUDGET_MB` (e.g. `3072` on
+an 8 GB VPS) together with a high `LINK_REQUEST_MAX_CONCURRENCY`
+ceiling switches the processor to adaptive mode — before each batch it
+measures its own RAM (RSS, `app/core/resources.py`) and adjusts the
+claim size AIMD-style: over budget the batch halves, under 80% of
+budget it grows by a quarter, so parallelism self-tunes to the memory
+the box actually has (the budget covers the whole worker process,
+connected clients included). Default `0` keeps the fixed-cap behaviour.
+Note the budget guards RAM only: temp-disk headroom still scales with
+concurrency × largest file, so size the ceiling with that in mind.
+
 ## Implementation map
 
 - `app/telegram/link_parser.py` — pure parser (public / `/c/` / topic /
