@@ -111,6 +111,7 @@ class AccountState:
     """Live per-account view for the dashboard."""
 
     account_id: int
+    label: int = 0  # 1-based number within THIS run (user-001, user-002…)
     planned: int = 0
     done: int = 0
     failed: int = 0
@@ -361,9 +362,9 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
     done_n = sum(s.done for s in states)
     failed_n = sum(s.failed for s in states)
     lines = []
-    lines.append("=" * 86)
+    lines.append("=" * 95)
     lines.append("  DESTRUCYION — LOAD TEST MONITOR (fake clients, pipeline asli)")
-    lines.append("=" * 86)
+    lines.append("=" * 95)
     lines.append(
         f"  elapsed {elapsed:7.1f}s    selesai {done_n}/{total_requests}    "
         f"gagal {failed_n}    antrean: pending {db_counts.get('pending', '?')}  "
@@ -375,18 +376,29 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         f"stream aktif {stats.active_streams} (max {stats.max_streams})   "
         f"upload aktif {stats.active_uploads} (max {stats.max_uploads})"
     )
-    lines.append("-" * 86)
+    lines.append("-" * 95)
     lines.append("  PETA USER:  [v] selesai   [D] download   [U] upload   [.] menunggu   [x] gagal")
     wall = [_symbol(s).replace("✓", "v").replace("✗", "x") for s in states]
     for i in range(0, len(wall), 50):
         lines.append("  " + " ".join(wall[i:i + 50]))
-    lines.append("-" * 86)
+    lines.append("-" * 95)
 
     # Full user table in a scrollable viewport. Default mode follows
     # the action (viewport sits on the page with active transfers);
     # any arrow key switches to manual scrolling and the view stays
     # exactly where the user put it — nothing auto-rotates.
-    ordered = sorted(states, key=lambda s: s.account_id)
+    # Border, header and rows are all built from ONE column-width
+    # table, so the pipes always line up.
+    columns = [("USER", 9), ("STATUS", 10), ("SIZE", 11),
+               ("PROCESS", 25), ("SPEED", 11), ("SAVED", 8)]
+
+    def _row(cells: list[str]) -> str:
+        return "  |" + "|".join(
+            f" {cell:<{width}} " for cell, (_, width) in zip(cells, columns)
+        ) + "|"
+
+    border = "  +" + "+".join("-" * (width + 2) for _, width in columns) + "+"
+    ordered = sorted(states, key=lambda s: s.label)
     page_size = 20
     if view is None:
         view = {"offset": 0, "follow": True}
@@ -405,13 +417,8 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         f"  TABEL USER — baris {offset + 1}-{offset + len(rows)} "
         f"dari {len(ordered)}   mode: {mode}"
     )
-    border = ("  +" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+"
-              + "-" * 30 + "+" + "-" * 11 + "+" + "-" * 9 + "+")
     lines.append(border)
-    lines.append(
-        f"  | {'USER':<8} | {'STATUS':<9} | {'SIZE':<9} | "
-        f"{'PROCESS':<28} | {'SPEED':<9} | {'SAVED':<7} |"
-    )
+    lines.append(_row([title for title, _ in columns]))
     lines.append(border)
     for s in rows:
         if s.last_sample_at:
@@ -434,12 +441,16 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
             bar = _bar(0, 1)
         size_mb = s.current_total / MB if s.current_total else 0.0
         speed = f"{s.rate_bps / MB:.1f} MB/s" if status in ("DOWNLOAD", "UPLOAD") else "-"
-        lines.append(
-            f"  | user-{s.account_id:<3} | {status:<9} | {size_mb:6.1f} MB | "
-            f"[{bar}] {pct:5.1f}% | {speed:<9} | {s.done}/{s.planned:<5} |"
-        )
+        lines.append(_row([
+            f"user-{s.label:03d}",
+            status,
+            f"{size_mb:6.1f} MB",
+            f"[{bar}] {pct:5.1f}%",
+            speed,
+            f"{s.done}/{s.planned}",
+        ]))
     lines.append(border)
-    lines.append("=" * 86)
+    lines.append("=" * 95)
     lines.append(
         "  [↑]/[↓] geser 1 baris   [PgUp]/[PgDn] geser 1 halaman   "
         "[f] ikuti aktif   [q] / Ctrl+C berhenti (laporan tetap dicetak)"
@@ -623,6 +634,31 @@ async def run(args: argparse.Namespace) -> int:
     factory = async_sessionmaker(bind=engine, class_=AsyncSession,
                                  expire_on_commit=False)
 
+    # Purge leftovers of previous harness runs from this scratch DB:
+    # otherwise account ids keep climbing across runs (user-301,
+    # user-401, ...) and yesterday's unfinished fake rows eat claim
+    # slots. Harness data is identifiable — queue rows point at
+    # t.me/loadtestchan and fake users carry telegram_user_id >= 9e8.
+    async with factory() as session:
+        from sqlalchemy import delete as sa_delete
+
+        from app.db.models.link_request import LinkRequest as _LR
+        from app.db.models.media_record import MediaRecord as _MR
+        from app.db.models.telegram_account import TelegramAccount as _TA
+        from app.db.models.user import User as _U
+
+        fake_users = select(_U.id).where(_U.telegram_user_id >= 900_000_000)
+        fake_accounts = select(_TA.id).where(_TA.user_id.in_(fake_users))
+        await session.execute(
+            sa_delete(_LR).where(_LR.raw_link.like("https://t.me/loadtestchan/%"))
+        )
+        await session.execute(
+            sa_delete(_MR).where(_MR.telegram_account_id.in_(fake_accounts))
+        )
+        await session.execute(sa_delete(_TA).where(_TA.id.in_(fake_accounts)))
+        await session.execute(sa_delete(_U).where(_U.id.in_(fake_users)))
+        await session.commit()
+
     # ---- plan + seed ---------------------------------------------------
     req_lo, req_hi = _parse_range(args.requests_per_account)
     stats = Stats()
@@ -656,7 +692,7 @@ async def run(args: argparse.Namespace) -> int:
                 )
                 msg_ids.append(next_msg_id)
                 next_msg_id += 1
-            st = AccountState(account_id=account.id, planned=planned)
+            st = AccountState(account_id=account.id, label=i + 1, planned=planned)
             states.append(st)
             states_by_account[account.id] = st
             jitter = rng.uniform(0.6, 1.6)
@@ -722,10 +758,24 @@ async def run(args: argparse.Namespace) -> int:
         print("DASHBOARD LIVE aktif — tampilan diperbarui tiap 0.5 detik "
               "selama test berjalan. Ctrl+C berhenti dengan aman dan "
               "laporan akhir tetap dicetak.", flush=True)
-        # The pipeline's INFO logs would shred the dashboard; keep WARNING+.
+        # The pipeline's INFO logs would shred the dashboard; keep
+        # WARNING+. The app logs through structlog filtering wrappers,
+        # which ignore the stdlib root level — reconfigure the wrapper
+        # too, or lines like saved_messages_transfer_progress leak
+        # straight through the table.
         import logging
 
         logging.getLogger().setLevel(logging.WARNING)
+        try:
+            import structlog
+
+            structlog.configure(
+                wrapper_class=structlog.make_filtering_bound_logger(
+                    logging.WARNING
+                )
+            )
+        except Exception:
+            pass
     # Ctrl+C (SIGINT), a container stop (SIGTERM), or pressing [q] in
     # the dashboard must end the run gracefully WITH the final report —
     # not kill the process silently. The handler cancels the drain; the
