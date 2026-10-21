@@ -37,10 +37,18 @@ Examples:
   python scripts/load_test_link_queue.py --confirm-scratch-db \
       --accounts 10 --file-min-mb 5 --file-max-mb 12 --requests-per-account 2-3
 
-  # the 100-user run, against a scratch PostgreSQL on the VPS
-  python scripts/load_test_link_queue.py --confirm-scratch-db \
+  # the 100-user run on the VPS, inside Docker. NOTE the --entrypoint:
+  # the worker service's own entrypoint (docker-entrypoint.sh) IGNORES
+  # any command and starts the worker by SERVICE_ROLE, so a plain
+  # `docker compose run worker python ...` just boots a worker and the
+  # script never runs. Overriding the entrypoint is what actually
+  # executes it. Create the scratch DB once first:
+  #   docker compose exec postgres createdb -U postgres loadtest
+  docker compose run --rm --entrypoint python worker \
+      scripts/load_test_link_queue.py --confirm-scratch-db --live \
       --accounts 100 --file-min-mb 30 --file-max-mb 200 \
-      --database-url postgresql+asyncpg://user:pass@127.0.0.1/loadtest
+      --requests-per-account 2-5 \
+      --database-url postgresql+asyncpg://postgres:postgres@postgres:5432/loadtest
 
 Rates are PER CONNECTION (each of the DOWNLOAD_WORKERS streams of a
 file, and each upload), jittered per account. Absolute wall-times are
@@ -315,23 +323,27 @@ async def _no_notify(self, request, text) -> None:
 # Dashboard
 # ---------------------------------------------------------------------------
 
-def _bar(done: int, total: int, width: int = 18) -> str:
+def _bar(done: int, total: int, width: int = 16) -> str:
     if total <= 0:
-        return " " * width
+        return "-" * width
     filled = min(width, int(width * min(done, total) / total))
-    return "█" * filled + "░" * (width - filled)
+    return "#" * filled + "-" * (width - filled)
+
+
+def _status(st: AccountState) -> str:
+    finished = st.planned > 0 and st.done + st.failed >= st.planned
+    if finished:
+        return "FAILED" if st.failed > 0 else "DONE"
+    if st.phase == "DOWN":
+        return "DOWNLOAD"
+    if st.phase == "UP":
+        return "UPLOAD"
+    return "WAITING"
 
 
 def _symbol(st: AccountState) -> str:
-    if st.failed > 0 and st.done + st.failed >= st.planned:
-        return "✗"
-    if st.done + st.failed >= st.planned and st.planned > 0:
-        return "✓"
-    if st.phase == "DOWN":
-        return "D"
-    if st.phase == "UP":
-        return "U"
-    return "·"
+    return {"DONE": "✓", "FAILED": "✗", "DOWNLOAD": "D",
+            "UPLOAD": "U", "WAITING": "·"}[_status(st)]
 
 
 def _render(states: list[AccountState], stats: Stats, *, started: float,
@@ -341,27 +353,44 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
     done_n = sum(s.done for s in states)
     failed_n = sum(s.failed for s in states)
     lines = []
-    lines.append("═" * 78)
+    lines.append("=" * 86)
+    lines.append("  DESTRUCYION — LOAD TEST MONITOR (fake clients, pipeline asli)")
+    lines.append("=" * 86)
     lines.append(
-        f" LOAD TEST  elapsed {elapsed:6.1f}s   "
-        f"done {done_n}/{total_requests}   failed {failed_n}   "
-        f"queue pending {db_counts.get('pending', '?')}  "
+        f"  elapsed {elapsed:7.1f}s    selesai {done_n}/{total_requests}    "
+        f"gagal {failed_n}    antrean: pending {db_counts.get('pending', '?')}  "
         f"processing {db_counts.get('processing', '?')}"
     )
     lines.append(
-        f" traffic    ↓ {stats.bytes_down / MB:9.1f} MB   ↑ {stats.bytes_up / MB:9.1f} MB   "
-        f"streams {stats.active_streams} (max {stats.max_streams})   "
-        f"uploads {stats.active_uploads} (max {stats.max_uploads})"
+        f"  traffic  download {stats.bytes_down / MB:9.1f} MB   "
+        f"upload {stats.bytes_up / MB:9.1f} MB    "
+        f"stream aktif {stats.active_streams} (max {stats.max_streams})   "
+        f"upload aktif {stats.active_uploads} (max {stats.max_uploads})"
     )
-    lines.append("─" * 78)
-    lines.append(" users:  ✓ done   D downloading   U uploading   · waiting   ✗ failed")
-    wall = [_symbol(s) for s in states]
+    lines.append("-" * 86)
+    lines.append("  PETA USER:  [v] selesai   [D] download   [U] upload   [.] menunggu   [x] gagal")
+    wall = [_symbol(s).replace("✓", "v").replace("✗", "x") for s in states]
     for i in range(0, len(wall), 50):
-        lines.append(" " + " ".join(wall[i:i + 50]))
-    lines.append("─" * 78)
-    active = [s for s in states if s.phase in ("DOWN", "UP")]
-    active.sort(key=lambda s: s.account_id)
-    for s in active[:14]:
+        lines.append("  " + " ".join(wall[i:i + 50]))
+    lines.append("-" * 86)
+
+    # Full user table, paged: the page rotates every 3 seconds so every
+    # one of the (possibly 100+) users is visible in turn.
+    ordered = sorted(states, key=lambda s: s.account_id)
+    page_size = 20
+    pages = max(1, (len(ordered) + page_size - 1) // page_size)
+    page = int(elapsed // 3) % pages
+    rows = ordered[page * page_size:(page + 1) * page_size]
+    lines.append(f"  TABEL USER — halaman {page + 1}/{pages} (berganti otomatis tiap 3 detik)")
+    border = ("  +" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+"
+              + "-" * 30 + "+" + "-" * 11 + "+" + "-" * 9 + "+")
+    lines.append(border)
+    lines.append(
+        f"  | {'USER':<8} | {'STATUS':<9} | {'SIZE':<9} | "
+        f"{'PROCESS':<28} | {'SPEED':<9} | {'SAVED':<7} |"
+    )
+    lines.append(border)
+    for s in rows:
         if s.last_sample_at:
             dt = max(now - s.last_sample_at, 0.001)
             s.rate_bps = 0.6 * s.rate_bps + 0.4 * (
@@ -369,19 +398,26 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
             )
         s.last_sample_bytes = s.total_bytes
         s.last_sample_at = now
-        shown_done = min(s.current_done, s.current_total)
-        pct = (100 * shown_done / s.current_total) if s.current_total else 0
+        status = _status(s)
+        if status == "DONE":
+            pct = 100.0
+            bar = _bar(1, 1)
+        elif status in ("DOWNLOAD", "UPLOAD") and s.current_total:
+            shown = min(s.current_done, s.current_total)
+            pct = 100 * shown / s.current_total
+            bar = _bar(shown, s.current_total)
+        else:
+            pct = 0.0
+            bar = _bar(0, 1)
+        size_mb = s.current_total / MB if s.current_total else 0.0
+        speed = f"{s.rate_bps / MB:.1f} MB/s" if status in ("DOWNLOAD", "UPLOAD") else "-"
         lines.append(
-            f" acc {s.account_id:>4}  {s.phase:<4} "
-            f"{shown_done / MB:7.1f}/{s.current_total / MB:6.1f} MB  "
-            f"[{_bar(s.current_done, s.current_total)}] {pct:5.1f}%  "
-            f"{s.rate_bps / MB:5.1f} MB/s  (selesai {s.done}/{s.planned})"
+            f"  | user-{s.account_id:<3} | {status:<9} | {size_mb:6.1f} MB | "
+            f"[{bar}] {pct:5.1f}% | {speed:<9} | {s.done}/{s.planned:<5} |"
         )
-    if len(active) > 14:
-        lines.append(f" …dan {len(active) - 14} user aktif lainnya")
-    if not active:
-        lines.append(" (tidak ada transfer aktif saat ini)")
-    lines.append("═" * 78)
+    lines.append(border)
+    lines.append("=" * 86)
+    lines.append("  Ctrl+C = berhenti dengan aman, laporan akhir tetap dicetak.")
     return "\n".join(lines)
 
 
