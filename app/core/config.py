@@ -176,7 +176,20 @@ class Settings(BaseSettings):
             "account at most). Without a cap, one user's huge video "
             "blocks every other user's saves behind it; with claiming, "
             "several worker processes can also share the queue, each "
-            "running up to this many."
+            "running up to this many. Acts as the HARD ceiling when the "
+            "memory budget below is enabled."
+        ),
+    )
+    link_request_memory_budget_mb: int = Field(
+        default=0,
+        description=(
+            "Adaptive concurrency: when > 0, the worker measures its own "
+            "RAM (RSS) before each batch and grows/shrinks how many "
+            "requests it claims so total memory stays near this budget "
+            "(e.g. 3072 on an 8 GB VPS) instead of a fixed slot count "
+            "deciding everything. 0 disables it — the fixed "
+            "link_request_max_concurrency applies as before. The budget "
+            "covers the whole worker process, clients included."
         ),
     )
     link_request_stale_seconds: float = Field(

@@ -205,11 +205,13 @@ class LinkRequestProcessor:
         process_message: ProcessMessageFn,
         poll_interval: float | None = None,
         max_concurrency: int | None = None,
+        memory_budget_mb: int | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._manager = manager
         self._process_message = process_message
         from app.core.config import get_settings
+        from app.core.resources import process_rss_mb
 
         settings = get_settings()
         if poll_interval is None:
@@ -225,6 +227,48 @@ class LinkRequestProcessor:
         # Saved Messages ordering sane), while DIFFERENT accounts proceed
         # fully in parallel up to the global cap.
         self._account_locks: dict[int, asyncio.Lock] = {}
+        # Adaptive mode (optional): instead of the fixed cap deciding
+        # how much parallelism the box can take, the processor measures
+        # its own RAM before each batch and grows/shrinks the claim size
+        # AIMD-style against a memory budget — many slots when files and
+        # memory are small, fewer when memory is tight. The fixed cap
+        # remains as the hard ceiling; 0 budget disables adaptation.
+        if memory_budget_mb is None:
+            memory_budget_mb = settings.link_request_memory_budget_mb
+        self._memory_budget_mb = memory_budget_mb if memory_budget_mb > 0 else None
+        self._rss_reader = process_rss_mb
+        self._dynamic_limit = min(10, self._max_concurrency)
+        self._last_claim_limit = self._max_concurrency
+
+    def _effective_claim_limit(self) -> int:
+        """How many requests to claim in the next batch.
+
+        Fixed mode: always the configured cap. Adaptive mode: AIMD on
+        the worker's own RSS vs the memory budget — halve the batch
+        when over budget, grow it by a quarter when comfortably under
+        (80%), hold steady in between or when RSS is unreadable.
+        """
+        if self._memory_budget_mb is None:
+            self._last_claim_limit = self._max_concurrency
+            return self._max_concurrency
+        rss = self._rss_reader()
+        if rss is not None:
+            old = self._dynamic_limit
+            if rss > self._memory_budget_mb:
+                self._dynamic_limit = max(1, old // 2)
+            elif rss < 0.8 * self._memory_budget_mb:
+                self._dynamic_limit = min(
+                    self._max_concurrency, old + max(1, old // 4)
+                )
+            if self._dynamic_limit != old:
+                log.info(
+                    "link_request_concurrency_adjusted",
+                    rss_mb=round(rss),
+                    budget_mb=self._memory_budget_mb,
+                    limit=self._dynamic_limit,
+                )
+        self._last_claim_limit = self._dynamic_limit
+        return self._dynamic_limit
 
     async def run_forever(self) -> None:
         """Poll until cancelled (worker shutdown cancels this task)."""
@@ -246,7 +290,7 @@ class LinkRequestProcessor:
                 processed = 0
             # A full batch means more work is likely waiting — loop
             # immediately instead of sleeping the whole poll interval.
-            if processed < self._max_concurrency:
+            if processed < self._last_claim_limit:
                 await asyncio.sleep(self._poll_interval)
 
     async def _reset_stale(self) -> None:
@@ -276,7 +320,7 @@ class LinkRequestProcessor:
 
         async with self._session_factory() as session:
             repo = LinkRequestRepository(session)
-            claimed = await repo.claim_pending(limit=self._max_concurrency)
+            claimed = await repo.claim_pending(limit=self._effective_claim_limit())
             for row in claimed:
                 # Keep loaded attributes usable after the session closes
                 # (commit would otherwise expire them).

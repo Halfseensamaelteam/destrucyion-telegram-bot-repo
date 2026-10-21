@@ -269,6 +269,75 @@ async def test_processor_serializes_the_same_account(db_session, user, account):
     assert state["max_active"] == 1
 
 
+def _budget_processor(db_session, *, cap, budget_mb, rss):
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(
+        factory, MagicMock(), process_message=AsyncMock(),
+        max_concurrency=cap, memory_budget_mb=budget_mb,
+    )
+    processor._rss_reader = lambda: rss
+    return processor
+
+
+async def test_adaptive_limit_shrinks_when_over_budget(db_session):
+    """AIMD: over the RAM budget, the claim batch halves down to 1."""
+    processor = _budget_processor(db_session, cap=50, budget_mb=100, rss=5000.0)
+    assert processor._effective_claim_limit() == 5   # 10 -> 5
+    assert processor._effective_claim_limit() == 2   # 5 -> 2
+    assert processor._effective_claim_limit() == 1   # 2 -> 1
+    assert processor._effective_claim_limit() == 1   # floor
+
+
+async def test_adaptive_limit_grows_when_under_budget(db_session):
+    """Under 80% of budget the batch grows by a quarter, capped."""
+    processor = _budget_processor(db_session, cap=50, budget_mb=100, rss=10.0)
+    first = processor._effective_claim_limit()
+    second = processor._effective_claim_limit()
+    assert second > first >= 10
+    for _ in range(30):
+        limit = processor._effective_claim_limit()
+    assert limit == 50  # never beyond the hard cap
+
+
+async def test_fixed_mode_ignores_rss(db_session):
+    """Budget disabled (default): the fixed cap rules, RSS is irrelevant."""
+    processor = _budget_processor(db_session, cap=7, budget_mb=0, rss=99999.0)
+    assert processor._effective_claim_limit() == 7
+
+
+async def test_adaptive_claim_processes_only_the_shrunken_batch(db_session, user, account):
+    """End-to-end in miniature: over budget, one pass claims 5 of 8."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+    from app.services.restricted import RestrictedContentService
+
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    processor = LinkRequestProcessor(
+        factory, manager,
+        process_message=AsyncMock(return_value="saved"),
+        max_concurrency=50, memory_budget_mb=100,
+    )
+    processor._rss_reader = lambda: 5000.0  # way over budget
+    processor._notify_owner = AsyncMock()
+    repo = LinkRequestRepository(db_session)
+    for i in range(8):
+        await repo.create(user_id=user.id, telegram_account_id=account.id,
+                          raw_link=f"https://t.me/chan/{i + 1}")
+    await db_session.commit()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(RestrictedContentService, "fetch_messages",
+                   AsyncMock(return_value=[MagicMock(id=42)]))
+        processed = await processor.process_pending_once()
+
+    assert processed == 5
+    remaining = await repo.list_pending(limit=50)
+    assert len(remaining) == 3
+    assert all(r.status == LinkRequestStatus.PENDING for r in remaining)
+
+
 async def test_stale_processing_requests_are_reset(db_session, user, account):
     """A request left in PROCESSING by a stopped worker must return to
     PENDING at startup, or it would never be retried."""
