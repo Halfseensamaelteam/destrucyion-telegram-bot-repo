@@ -57,6 +57,12 @@ from app.telegram.link_parser import InviteRef, PostRef
 
 log = get_logger(__name__)
 
+#: Budget-only mode's automatic temp-disk guard: each in-flight slot is
+#: assumed to hold one 200 MB-class temp file plus headroom (x1.5), so
+#: slots = free temp MB // this reserve. Deliberately conservative —
+#: the processor cannot know a link's file size before fetching it.
+_DISK_RESERVE_PER_SLOT_MB = 300
+
 
 class RestrictedContentError(Exception):
     """Raised when a restricted-content fetch cannot be completed."""
@@ -211,7 +217,7 @@ class LinkRequestProcessor:
         self._manager = manager
         self._process_message = process_message
         from app.core.config import get_settings
-        from app.core.resources import process_rss_mb
+        from app.core.resources import process_rss_mb, temp_free_mb
 
         settings = get_settings()
         if poll_interval is None:
@@ -219,6 +225,21 @@ class LinkRequestProcessor:
         self._poll_interval = poll_interval
         if max_concurrency is None:
             max_concurrency = settings.link_request_max_concurrency
+        if memory_budget_mb is None:
+            memory_budget_mb = settings.link_request_memory_budget_mb
+        self._memory_budget_mb = memory_budget_mb if memory_budget_mb > 0 else None
+        # Budget-only mode: a slot cap of 0 TOGETHER with a memory
+        # budget removes the human-set ceiling entirely — parallelism
+        # is then sized purely by measured RAM (AIMD below) plus an
+        # automatic temp-disk guard, because RAM cannot see the disk:
+        # hundreds of slots fit in a few GB of RAM long before their
+        # temp files fit on disk. A cap of 0 WITHOUT a budget would
+        # leave the queue unguarded, so it falls back to the default.
+        self._budget_only = (
+            max_concurrency == 0 and self._memory_budget_mb is not None
+        )
+        if max_concurrency == 0:
+            max_concurrency = 100_000 if self._budget_only else 10
         self._max_concurrency = max(1, max_concurrency)
         self._stale_seconds = settings.link_request_stale_seconds
         self._semaphore = asyncio.Semaphore(self._max_concurrency)
@@ -227,16 +248,9 @@ class LinkRequestProcessor:
         # Saved Messages ordering sane), while DIFFERENT accounts proceed
         # fully in parallel up to the global cap.
         self._account_locks: dict[int, asyncio.Lock] = {}
-        # Adaptive mode (optional): instead of the fixed cap deciding
-        # how much parallelism the box can take, the processor measures
-        # its own RAM before each batch and grows/shrinks the claim size
-        # AIMD-style against a memory budget — many slots when files and
-        # memory are small, fewer when memory is tight. The fixed cap
-        # remains as the hard ceiling; 0 budget disables adaptation.
-        if memory_budget_mb is None:
-            memory_budget_mb = settings.link_request_memory_budget_mb
-        self._memory_budget_mb = memory_budget_mb if memory_budget_mb > 0 else None
         self._rss_reader = process_rss_mb
+        self._temp_free_reader = temp_free_mb
+        self._last_disk_cap: int | None = None
         self._dynamic_limit = min(10, self._max_concurrency)
         self._last_claim_limit = self._max_concurrency
 
@@ -247,28 +261,44 @@ class LinkRequestProcessor:
         the worker's own RSS vs the memory budget — halve the batch
         when over budget, grow it by a quarter when comfortably under
         (80%), hold steady in between or when RSS is unreadable.
+        Budget-only mode additionally applies the temp-disk guard:
+        free temp space divided by a per-slot reserve (a 200 MB-class
+        file x 1.5), recomputed every cycle.
         """
         if self._memory_budget_mb is None:
-            self._last_claim_limit = self._max_concurrency
-            return self._max_concurrency
-        rss = self._rss_reader()
-        if rss is not None:
-            old = self._dynamic_limit
-            if rss > self._memory_budget_mb:
-                self._dynamic_limit = max(1, old // 2)
-            elif rss < 0.8 * self._memory_budget_mb:
-                self._dynamic_limit = min(
-                    self._max_concurrency, old + max(1, old // 4)
-                )
-            if self._dynamic_limit != old:
-                log.info(
-                    "link_request_concurrency_adjusted",
-                    rss_mb=round(rss),
-                    budget_mb=self._memory_budget_mb,
-                    limit=self._dynamic_limit,
-                )
-        self._last_claim_limit = self._dynamic_limit
-        return self._dynamic_limit
+            limit = self._max_concurrency
+        else:
+            rss = self._rss_reader()
+            if rss is not None:
+                old = self._dynamic_limit
+                if rss > self._memory_budget_mb:
+                    self._dynamic_limit = max(1, old // 2)
+                elif rss < 0.8 * self._memory_budget_mb:
+                    self._dynamic_limit = min(
+                        self._max_concurrency, old + max(1, old // 4)
+                    )
+                if self._dynamic_limit != old:
+                    log.info(
+                        "link_request_concurrency_adjusted",
+                        rss_mb=round(rss),
+                        budget_mb=self._memory_budget_mb,
+                        limit=self._dynamic_limit,
+                    )
+            limit = self._dynamic_limit
+        if self._budget_only:
+            free = self._temp_free_reader()
+            if free is not None:
+                disk_cap = max(1, int(free // _DISK_RESERVE_PER_SLOT_MB))
+                if disk_cap != self._last_disk_cap:
+                    log.info(
+                        "link_request_disk_guard",
+                        free_temp_mb=round(free),
+                        disk_cap=disk_cap,
+                    )
+                    self._last_disk_cap = disk_cap
+                limit = min(limit, disk_cap)
+        self._last_claim_limit = limit
+        return limit
 
     async def run_forever(self) -> None:
         """Poll until cancelled (worker shutdown cancels this task)."""

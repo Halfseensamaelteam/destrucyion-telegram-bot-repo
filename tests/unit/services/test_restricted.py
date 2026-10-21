@@ -338,6 +338,43 @@ async def test_adaptive_claim_processes_only_the_shrunken_batch(db_session, user
     assert all(r.status == LinkRequestStatus.PENDING for r in remaining)
 
 
+def _budget_only_processor(db_session, *, rss, free_mb):
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(
+        factory, MagicMock(), process_message=AsyncMock(),
+        max_concurrency=0, memory_budget_mb=3072,
+    )
+    processor._rss_reader = lambda: rss
+    processor._temp_free_reader = lambda: free_mb
+    return processor
+
+
+async def test_budget_only_removes_the_slot_cap(db_session):
+    """Cap 0 + budget: no human ceiling; RAM sizes the batch."""
+    processor = _budget_only_processor(db_session, rss=100.0, free_mb=900_000.0)
+    assert processor._budget_only is True
+    assert processor._max_concurrency == 100_000
+    # RAM comfortably under budget -> batch grows past any old cap.
+    assert processor._effective_claim_limit() == 12  # 10 + 25%
+
+
+async def test_budget_only_disk_guard_binds(db_session):
+    """RAM cannot see the disk: 900 MB free temp = 3 slots, no more."""
+    processor = _budget_only_processor(db_session, rss=100.0, free_mb=900.0)
+    assert processor._effective_claim_limit() == 3  # 900 // 300 reserve
+
+
+async def test_zero_cap_without_budget_falls_back_to_default(db_session):
+    """Cap 0 with NO budget must not leave the queue unguarded."""
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(
+        factory, MagicMock(), process_message=AsyncMock(),
+        max_concurrency=0, memory_budget_mb=0,
+    )
+    assert processor._budget_only is False
+    assert processor._effective_claim_limit() == 10
+
+
 async def test_stale_processing_requests_are_reset(db_session, user, account):
     """A request left in PROCESSING by a stopped worker must return to
     PENDING at startup, or it would never be retried."""

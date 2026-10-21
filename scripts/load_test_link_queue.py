@@ -656,9 +656,21 @@ async def run(args: argparse.Namespace) -> int:
     import shutil
     import tempfile
 
-    in_flight = min(settings.link_request_max_concurrency, args.accounts)
-    needed_mb = in_flight * args.file_max_mb * 1.5
+    cap = settings.link_request_max_concurrency
     free_mb = shutil.disk_usage(tempfile.gettempdir()).free / 1e6
+    if cap <= 0:
+        # Budget-only mode: the processor's disk guard sizes slots from
+        # free space, so the worst case IS the disk — derive the
+        # effective in-flight count from it instead of blocking a run
+        # the guard would have kept safe.
+        in_flight = min(
+            args.accounts, max(1, int(free_mb // (args.file_max_mb * 1.5)))
+        )
+        print(f"budget-only mode: effective in-flight from disk "
+              f"= {in_flight}")
+    else:
+        in_flight = min(cap, args.accounts)
+    needed_mb = in_flight * args.file_max_mb * 1.5
     print(f"temp dir: {tempfile.gettempdir()}  free={free_mb:.0f} MB  "
           f"needed~{needed_mb:.0f} MB ({in_flight} in flight x "
           f"{args.file_max_mb} MB x1.5)")

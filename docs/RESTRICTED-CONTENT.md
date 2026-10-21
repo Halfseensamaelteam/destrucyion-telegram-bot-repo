@@ -121,6 +121,14 @@ connected clients included). Default `0` keeps the fixed-cap behaviour.
 Note the budget guards RAM only: temp-disk headroom still scales with
 concurrency × largest file, so size the ceiling with that in mind.
 
+Setting `LINK_REQUEST_MAX_CONCURRENCY=0` **together with** a budget
+selects budget-only mode: no human-set slot cap at all — the AIMD
+controller above is the only RAM limiter, and an automatic disk guard
+caps each batch at `free temp MB // 300` (a 200 MB-class file × 1.5
+reserve per slot, recomputed every cycle), because RAM alone cannot
+see the disk filling up. A cap of `0` without a budget falls back to
+the fixed default of 10 rather than running unguarded.
+
 ## Implementation map
 
 - `app/telegram/link_parser.py` — pure parser (public / `/c/` / topic /

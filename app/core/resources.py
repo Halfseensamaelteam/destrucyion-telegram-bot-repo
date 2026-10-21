@@ -23,3 +23,19 @@ def process_rss_mb() -> float | None:
         return resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
     except Exception:
         return None
+
+
+def temp_free_mb() -> float | None:
+    """Free space (MiB) on the filesystem holding the temp dir, or None.
+
+    Transfer temp files live in tempfile.gettempdir(); their aggregate
+    size scales with in-flight transfers, so the concurrency controller
+    consults this before opening more slots.
+    """
+    try:
+        import shutil
+        import tempfile
+
+        return shutil.disk_usage(tempfile.gettempdir()).free / (1024 * 1024)
+    except Exception:
+        return None

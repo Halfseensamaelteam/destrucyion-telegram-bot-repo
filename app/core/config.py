@@ -177,7 +177,11 @@ class Settings(BaseSettings):
             "blocks every other user's saves behind it; with claiming, "
             "several worker processes can also share the queue, each "
             "running up to this many. Acts as the HARD ceiling when the "
-            "memory budget below is enabled."
+            "memory budget below is enabled. Special value 0 = no slot "
+            "cap at all ('budget-only' mode): only valid together with "
+            "a memory budget — the processor then sizes parallelism "
+            "purely from measured RAM (plus an automatic temp-disk "
+            "guard). 0 without a budget falls back to the default of 10."
         ),
     )
     link_request_memory_budget_mb: int = Field(
