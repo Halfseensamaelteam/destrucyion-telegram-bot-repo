@@ -386,7 +386,7 @@ async def _process_message(
 
     Args:
         force: True for manual saves — bypasses the timed-only filter and
-            retries a previously FAILED record.
+            retries a previously FAILED or interrupted (PENDING) record.
         capture_only_timed: If True, non-timed media is ignored — EXCEPT
             protected (noforwards) media when capture_protected_content
             is on: a protected post can never be fetched by forwarding
@@ -446,9 +446,15 @@ async def _process_message(
     if not created:
         from app.db.models.media_record import MediaRecordStatus
 
-        # A manual save may retry something that failed earlier; everything
-        # else that already exists is a true duplicate.
-        if not (force and record.status == MediaRecordStatus.FAILED):
+        # A manual/link save may retry something that FAILED earlier or is
+        # still PENDING — PENDING here means a previous attempt was cut off
+        # mid-transfer (worker stopped during a long download) and never
+        # actually saved anything, which RecoveryService likewise treats
+        # as incomplete. Everything else that exists is a true duplicate.
+        if not (
+            force
+            and record.status in (MediaRecordStatus.FAILED, MediaRecordStatus.PENDING)
+        ):
             log.debug("media_already_known", account_id=account_id, record_id=record.id)
             return "duplicate"
 

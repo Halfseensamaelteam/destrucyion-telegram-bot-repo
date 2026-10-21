@@ -85,6 +85,33 @@ def with_flood_wait_retry(max_retries: int = 3):
     return decorator
 
 
+def _make_progress_logger(phase: str, account_id: int):
+    """Build a Telethon progress_callback that logs at 25% steps.
+
+    Telethon calls progress_callback(received_bytes, total_bytes) many
+    times per transfer; logging every call would flood the log, so only
+    the 0/25/50/75/100% crossings are emitted.
+    """
+    state = {"last_bucket": -1}
+
+    def _callback(received: int, total: int) -> None:
+        if not total:
+            return
+        bucket = int(received * 100 / total) // 25
+        if bucket != state["last_bucket"]:
+            state["last_bucket"] = bucket
+            log.info(
+                "saved_messages_transfer_progress",
+                account_id=account_id,
+                phase=phase,
+                percent=int(received * 100 / total),
+                received_bytes=received,
+                total_bytes=total,
+            )
+
+    return _callback
+
+
 class SavedMessagesService:
     """Forwards media from a captured event to the account's own Saved Messages.
 
@@ -266,11 +293,30 @@ class SavedMessagesService:
 
         tmp_dir = tempfile.mkdtemp(prefix="destrucyion_")
         try:
-            file_path = await self._client.download_media(source_message, file=tmp_dir)
+            # Progress logging: a download+upload of a large video can take
+            # minutes, and a silent worker looks exactly like a hung one
+            # (the reference bots show a live % for this reason). Log at
+            # 0/25/50/75/100% so the worker log proves the transfer is alive.
+            total_size = getattr(getattr(source_message, "file", None), "size", None)
+            log.info(
+                "saved_messages_resend_starting",
+                account_id=self._account_id,
+                size_bytes=total_size,
+            )
+            file_path = await self._client.download_media(
+                source_message,
+                file=tmp_dir,
+                progress_callback=_make_progress_logger("download", self._account_id),
+            )
             if not file_path:
                 raise SavedMessagesForwardError(
                     "Telegram did not return a downloadable file"
                 )
+            log.info(
+                "saved_messages_download_complete",
+                account_id=self._account_id,
+                file_path=file_path,
+            )
 
             # Extract video metadata for proper video attributes
             video_attrs = None
@@ -318,7 +364,15 @@ class SavedMessagesService:
             if thumb_path and os.path.exists(thumb_path):
                 send_file_kwargs["thumb"] = thumb_path
 
+            send_file_kwargs["progress_callback"] = _make_progress_logger(
+                "upload", self._account_id
+            )
             sent = await self._client.send_file(**send_file_kwargs)
+            log.info(
+                "saved_messages_upload_complete",
+                account_id=self._account_id,
+                saved_msg_id=getattr(sent, "id", None),
+            )
 
             return ForwardResult(
                 saved_message_id=sent.id,

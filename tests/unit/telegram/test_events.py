@@ -228,6 +228,33 @@ async def test_timed_media_is_saved_in_automatic_mode():
     cap_instance.mark_saved.assert_awaited_once()
 
 
+async def test_pending_record_is_retried_on_force_save():
+    """A PENDING record means a previous attempt was cut off mid-transfer
+    (e.g. worker stopped during a long download) — a forced save must
+    actually save it, not report it as a duplicate."""
+    record = MagicMock(id=5, status=MediaRecordStatus.PENDING, ttl_seconds=None, media_type=MediaType.PHOTO)
+    cap_instance = MagicMock()
+    cap_instance.record = AsyncMock(return_value=(record, False))
+    cap_instance.mark_saved = AsyncMock()
+    fwd_instance = MagicMock()
+    fwd_instance.forward = AsyncMock(return_value=MagicMock(saved_message_id=77, was_resent=True))
+
+    with patch.object(ev, "classify_message", return_value=timed_info()), \
+         patch.object(ev, "_build_context", AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))), \
+         patch.object(ev, "MediaCaptureService", return_value=cap_instance), \
+         patch.object(ev, "SavedMessagesService", return_value=fwd_instance):
+        outcome = await ev._process_message(
+            message=MagicMock(),
+            account_id=1,
+            manager=make_manager(client=MagicMock()),
+            session_factory=make_session_factory(),
+            force=True,
+            capture_only_timed=False,
+        )
+    assert outcome == "saved"
+    fwd_instance.forward.assert_awaited_once()
+
+
 async def test_duplicate_is_not_reprocessed():
     record = MagicMock(id=5, status=MediaRecordStatus.SAVED)
     cap_instance = MagicMock()

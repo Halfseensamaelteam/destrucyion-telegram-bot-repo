@@ -92,7 +92,7 @@ def make_client(forward_result_id=1234, send_result_id=5678) -> MagicMock:
 
     # download_media writes a real file into the given directory (the service
     # downloads into a TemporaryDirectory) and returns its path.
-    async def _fake_download(message, file=None):
+    async def _fake_download(message, file=None, **kwargs):
         import os
 
         path = os.path.join(file, "media.bin")
