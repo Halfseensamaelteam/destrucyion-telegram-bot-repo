@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "20261021_01"
 down_revision: Union[str, None] = "a4c7a019665f"
@@ -17,10 +18,28 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    link_request_status = sa.Enum(
-        "pending", "processing", "done", "failed", name="linkrequeststatus"
+    # Create the enum type idempotently: a previous failed attempt at this
+    # migration may have left the type behind (CREATE TYPE inside the
+    # migration transaction does not always roll back cleanly on every
+    # driver), and SQLAlchemy's create_table would otherwise try to create
+    # it a second time and fail with DuplicateObjectError. The column uses
+    # create_type=False so create_table never re-creates it.
+    op.execute(
+        """
+        DO $$ BEGIN
+            CREATE TYPE linkrequeststatus AS ENUM ('pending', 'processing', 'done', 'failed');
+        EXCEPTION WHEN duplicate_object THEN null;
+        END $$;
+        """
     )
-    link_request_status.create(op.get_bind(), checkfirst=True)
+    link_request_status = postgresql.ENUM(
+        "pending",
+        "processing",
+        "done",
+        "failed",
+        name="linkrequeststatus",
+        create_type=False,
+    )
     op.create_table(
         "link_requests",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
@@ -63,4 +82,4 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_table("link_requests")
-    sa.Enum(name="linkrequeststatus").drop(op.get_bind(), checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS linkrequeststatus")
