@@ -27,6 +27,14 @@ class TelegramNotifier:
         """Send a plain transactional text message to a user."""
         await self._bot.send_message(chat_id=telegram_user_id, text=text)
 
+    async def edit_text(
+        self, *, chat_id: int, message_id: int, text: str
+    ) -> None:
+        """Edit an existing message (e.g. a request's status message)."""
+        await self._bot.edit_message_text(
+            chat_id=chat_id, message_id=message_id, text=text
+        )
+
     async def send_subscription_activated(
         self,
         *,

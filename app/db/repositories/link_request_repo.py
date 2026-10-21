@@ -19,13 +19,21 @@ class LinkRequestRepository:
         self._session = session
 
     async def create(
-        self, *, user_id: int, telegram_account_id: int, raw_link: str
+        self,
+        *,
+        user_id: int,
+        telegram_account_id: int,
+        raw_link: str,
+        notify_chat_id: int | None = None,
+        notify_message_id: int | None = None,
     ) -> LinkRequest:
         request = LinkRequest(
             user_id=user_id,
             telegram_account_id=telegram_account_id,
             raw_link=raw_link,
             status=LinkRequestStatus.PENDING,
+            notify_chat_id=notify_chat_id,
+            notify_message_id=notify_message_id,
         )
         self._session.add(request)
         await self._session.flush()

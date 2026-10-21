@@ -145,7 +145,7 @@ class Settings(BaseSettings):
         ),
     )
     download_workers: int = Field(
-        default=4,
+        default=8,
         description=(
             "Parallel connections used to download a document for the "
             "download+upload resend path. Telethon's plain download_media "
@@ -159,6 +159,14 @@ class Settings(BaseSettings):
         description=(
             "Files smaller than this skip the parallel downloader — the "
             "connection setup overhead is not worth it for small media."
+        ),
+    )
+    link_request_poll_seconds: float = Field(
+        default=3.0,
+        description=(
+            "How often the worker checks for newly queued link requests. "
+            "This is pure waiting time added before a save even starts, "
+            "so keep it small; the check is one indexed SELECT."
         ),
     )
     display_timezone: str = Field(
