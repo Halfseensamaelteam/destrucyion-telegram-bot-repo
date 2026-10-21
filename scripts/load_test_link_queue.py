@@ -190,13 +190,17 @@ class FakeTelegramClient:
 
     def __init__(self, stats: Stats, state: AccountState,
                  sizes: dict[int, int], download_bps: float,
-                 upload_bps: float) -> None:
+                 upload_bps: float, start_delay: float = 0.0) -> None:
         self._stats = stats
         self._state = state
         self._sizes = sizes
         self._messages: dict[int, FakeMessage] = {}
         self._download_bps = download_bps
         self._upload_bps = upload_bps
+        # Real users do not all start at the same instant: each fake
+        # account waits a random stagger once, before its first fetch.
+        self._start_delay = start_delay
+        self._started = False
 
     def _message_for(self, msg_id: int) -> FakeMessage:
         if msg_id not in self._messages:
@@ -204,6 +208,10 @@ class FakeTelegramClient:
         return self._messages[msg_id]
 
     async def get_messages(self, peer, ids=None):
+        if not self._started:
+            self._started = True
+            if self._start_delay > 0:
+                await asyncio.sleep(self._start_delay)
         message = self._message_for(int(ids))
         st = self._state
         st.phase = "DOWN"
@@ -347,7 +355,7 @@ def _symbol(st: AccountState) -> str:
 
 
 def _render(states: list[AccountState], stats: Stats, *, started: float,
-            total_requests: int, db_counts: dict) -> str:
+            total_requests: int, db_counts: dict, view: dict | None = None) -> str:
     now = time.monotonic()
     elapsed = now - started
     done_n = sum(s.done for s in states)
@@ -374,14 +382,29 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         lines.append("  " + " ".join(wall[i:i + 50]))
     lines.append("-" * 86)
 
-    # Full user table, paged: the page rotates every 3 seconds so every
-    # one of the (possibly 100+) users is visible in turn.
+    # Full user table in a scrollable viewport. Default mode follows
+    # the action (viewport sits on the page with active transfers);
+    # any arrow key switches to manual scrolling and the view stays
+    # exactly where the user put it — nothing auto-rotates.
     ordered = sorted(states, key=lambda s: s.account_id)
     page_size = 20
-    pages = max(1, (len(ordered) + page_size - 1) // page_size)
-    page = int(elapsed // 3) % pages
-    rows = ordered[page * page_size:(page + 1) * page_size]
-    lines.append(f"  TABEL USER — halaman {page + 1}/{pages} (berganti otomatis tiap 3 detik)")
+    if view is None:
+        view = {"offset": 0, "follow": True}
+    if view["follow"]:
+        first_active = next(
+            (i for i, s in enumerate(ordered)
+             if _status(s) in ("DOWNLOAD", "UPLOAD")),
+            0,
+        )
+        view["offset"] = (first_active // page_size) * page_size
+    offset = max(0, min(view["offset"], max(0, len(ordered) - 1)))
+    view["offset"] = offset
+    rows = ordered[offset:offset + page_size]
+    mode = "IKUTI AKTIF" if view["follow"] else "SCROLL MANUAL"
+    lines.append(
+        f"  TABEL USER — baris {offset + 1}-{offset + len(rows)} "
+        f"dari {len(ordered)}   mode: {mode}"
+    )
     border = ("  +" + "-" * 10 + "+" + "-" * 11 + "+" + "-" * 11 + "+"
               + "-" * 30 + "+" + "-" * 11 + "+" + "-" * 9 + "+")
     lines.append(border)
@@ -417,22 +440,94 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         )
     lines.append(border)
     lines.append("=" * 86)
-    lines.append("  Ctrl+C = berhenti dengan aman, laporan akhir tetap dicetak.")
+    lines.append(
+        "  [↑]/[↓] geser 1 baris   [PgUp]/[PgDn] geser 1 halaman   "
+        "[f] ikuti aktif   [q] / Ctrl+C berhenti (laporan tetap dicetak)"
+    )
     return "\n".join(lines)
 
 
 async def _dashboard(states, stats, *, started, total_requests, live: bool,
-                     db_counts: dict, stop: asyncio.Event) -> None:
+                     db_counts: dict, stop: asyncio.Event, on_quit=None) -> None:
     if live:
+        view = {"offset": 0, "follow": True}
+        # Keyboard control: raw-mode stdin, arrow keys scroll the table
+        # viewport (no auto-rotation). Disabled silently when stdin is
+        # not a TTY (follow mode then simply stays on).
+        loop = asyncio.get_running_loop()
+        fd = None
+        old_term = None
+        keybuf = bytearray()
+
+        def _on_key() -> None:
+            try:
+                data = os.read(fd, 64)
+            except OSError:
+                return
+            if not data:
+                return
+            keybuf.extend(data)
+            while keybuf:
+                head3 = bytes(keybuf[:3])
+                head4 = bytes(keybuf[:4])
+                if head3 == b"\x1b[A" or keybuf[:1] == b"k":
+                    n = 3 if head3 == b"\x1b[A" else 1
+                    del keybuf[:n]
+                    view["follow"] = False
+                    view["offset"] -= 1
+                elif head3 == b"\x1b[B" or keybuf[:1] == b"j":
+                    n = 3 if head3 == b"\x1b[B" else 1
+                    del keybuf[:n]
+                    view["follow"] = False
+                    view["offset"] += 1
+                elif head4 == b"\x1b[5~":
+                    del keybuf[:4]
+                    view["follow"] = False
+                    view["offset"] -= 20
+                elif head4 == b"\x1b[6~":
+                    del keybuf[:4]
+                    view["follow"] = False
+                    view["offset"] += 20
+                elif keybuf[:1] == b"f":
+                    del keybuf[:1]
+                    view["follow"] = True
+                elif keybuf[:1] == b"q":
+                    del keybuf[:1]
+                    if on_quit is not None:
+                        on_quit()
+                elif keybuf[:1] == b"\x1b" and len(keybuf) < 4:
+                    break  # partial escape sequence — wait for the rest
+                else:
+                    del keybuf[:1]
+            view["offset"] = max(0, view["offset"])
+
+        try:
+            import termios
+            import tty
+
+            fd = sys.stdin.fileno()
+            old_term = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            loop.add_reader(fd, _on_key)
+        except Exception:
+            fd = None
+            old_term = None
+
         sys.stdout.write("\033[?25l")  # hide cursor
         try:
             while not stop.is_set():
                 frame = _render(states, stats, started=started,
-                                total_requests=total_requests, db_counts=db_counts)
+                                total_requests=total_requests,
+                                db_counts=db_counts, view=view)
                 sys.stdout.write("\033[H\033[2J" + frame + "\n")
                 sys.stdout.flush()
                 await asyncio.sleep(0.5)
         finally:
+            if fd is not None and old_term is not None:
+                import termios
+
+                loop.remove_reader(fd)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_term)
             sys.stdout.write("\033[?25h\033[H\033[2J")
             sys.stdout.flush()
     else:
@@ -543,6 +638,8 @@ async def run(args: argparse.Namespace) -> int:
         user_repo = UserRepository(session)
         account_repo = TelegramAccountRepository(session)
         link_repo = LinkRequestRepository(session)
+        # Pass 1: accounts, clients, and each account's size plan.
+        plans: list[tuple[int, int, dict[int, int], list[int]]] = []
         for i in range(args.accounts):
             user = await user_repo.create(telegram_user_id=base_tg_id + i)
             account = await account_repo.create(
@@ -552,6 +649,13 @@ async def run(args: argparse.Namespace) -> int:
             )
             planned = rng.randint(req_lo, req_hi)
             sizes: dict[int, int] = {}
+            msg_ids: list[int] = []
+            for _ in range(planned):
+                sizes[next_msg_id] = int(
+                    rng.uniform(args.file_min_mb, args.file_max_mb) * MB
+                )
+                msg_ids.append(next_msg_id)
+                next_msg_id += 1
             st = AccountState(account_id=account.id, planned=planned)
             states.append(st)
             states_by_account[account.id] = st
@@ -563,24 +667,50 @@ async def run(args: argparse.Namespace) -> int:
                     stats, st, sizes,
                     download_bps=args.download_mbps * MB * jitter,
                     upload_bps=args.upload_mbps * MB * jitter,
+                    start_delay=rng.uniform(0, args.stagger_seconds),
                 ),
             )
-            for _ in range(planned):
-                size = int(rng.uniform(args.file_min_mb, args.file_max_mb) * MB)
-                sizes[next_msg_id] = size
+            plans.append((user.id, account.id, sizes, msg_ids))
+        # Pass 2: create the queue rows ROUND-ROBIN across accounts
+        # (everyone's 1st request first, then everyone's 2nd, ...).
+        # The processor claims oldest-first, so block-seeding one
+        # account's whole queue first would let the first ~3 accounts
+        # hog the opening batches behind the per-account lock while
+        # user 150 never starts; interleaving makes the first batch
+        # span 10 different users, like real arrivals.
+        max_rounds = max((len(p[3]) for p in plans), default=0)
+        for r in range(max_rounds):
+            round_accounts = [p for p in plans if len(p[3]) > r]
+            rng.shuffle(round_accounts)
+            for user_id, account_id, _sizes, msg_ids in round_accounts:
                 row = await link_repo.create(
-                    user_id=user.id,
-                    telegram_account_id=account.id,
-                    raw_link=f"https://t.me/loadtestchan/{next_msg_id}",
+                    user_id=user_id,
+                    telegram_account_id=account_id,
+                    raw_link=f"https://t.me/loadtestchan/{msg_ids[r]}",
                 )
                 request_ids.append(row.id)
-                request_account[row.id] = account.id
-                next_msg_id += 1
+                request_account[row.id] = account_id
         await session.commit()
     total_requests = len(request_ids)
     print(f"seeded {total_requests} pending requests for {args.accounts} accounts")
 
     # ---- drain the queue with the real processor + live dashboard ------
+    # Neutralize the operator admin notification: when the environment
+    # carries a real BOT_TOKEN + ADMIN_NOTIFY_CHAT_ID (e.g. the trial
+    # stack's .env), every save would otherwise try to upload the whole
+    # fake file to Telegram via the real Bot API — 3 retries x 300 s
+    # timeouts — stalling the pipeline for minutes per request (this
+    # actually happened: 3 fake uploads done, 0 requests DONE in 117 s).
+    # Admin notify is an operator side-channel, not the pipeline under
+    # test. (events._process_message imports it per call, so replacing
+    # the module attribute is enough.)
+    import app.telegram.admin_notify as _admin_notify_module
+
+    async def _noop_admin_notify(**kwargs) -> None:
+        return None
+
+    _admin_notify_module.notify_admin_of_capture = _noop_admin_notify
+
     processor = LinkRequestProcessor(factory, manager, process_message=_process_message)
     processor._notify_owner = _no_notify.__get__(processor, LinkRequestProcessor)
 
@@ -596,10 +726,33 @@ async def run(args: argparse.Namespace) -> int:
         import logging
 
         logging.getLogger().setLevel(logging.WARNING)
+    # Ctrl+C (SIGINT), a container stop (SIGTERM), or pressing [q] in
+    # the dashboard must end the run gracefully WITH the final report —
+    # not kill the process silently. The handler cancels the drain; the
+    # CancelledError is caught below and execution falls through to the
+    # report with partial results.
+    interrupted = False
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _request_stop() -> None:
+        nonlocal interrupted
+        interrupted = True
+        if main_task is not None:
+            main_task.cancel()
+
+    import signal as _signal
+
+    for _sig in (_signal.SIGINT, _signal.SIGTERM):
+        try:
+            loop.add_signal_handler(_sig, _request_stop)
+        except (NotImplementedError, RuntimeError):
+            pass
+
     dash = asyncio.create_task(
         _dashboard(states, stats, started=started,
                    total_requests=total_requests, live=live,
-                   db_counts=db_counts, stop=stop)
+                   db_counts=db_counts, stop=stop, on_quit=_request_stop)
     )
 
     async def _refresh_counts() -> None:
@@ -639,28 +792,6 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.sleep(2)
 
     counts_task = asyncio.create_task(_counts_loop())
-
-    # Ctrl+C (SIGINT) or a container stop (SIGTERM) must end the run
-    # gracefully WITH the final report — not kill the process silently.
-    # The handler cancels the drain; the CancelledError is caught below
-    # and execution falls through to the report with partial results.
-    interrupted = False
-    loop = asyncio.get_running_loop()
-    main_task = asyncio.current_task()
-
-    def _request_stop() -> None:
-        nonlocal interrupted
-        interrupted = True
-        if main_task is not None:
-            main_task.cancel()
-
-    import signal as _signal
-
-    for _sig in (_signal.SIGINT, _signal.SIGTERM):
-        try:
-            loop.add_signal_handler(_sig, _request_stop)
-        except (NotImplementedError, RuntimeError):
-            pass
 
     deadline = started + args.timeout
     try:
@@ -749,6 +880,9 @@ def main() -> None:
                         help="simulated per-connection upload MB/s")
     parser.add_argument("--seed", type=int, default=42,
                         help="random seed — same seed, same workload plan")
+    parser.add_argument("--stagger-seconds", type=float, default=8.0,
+                        help="each account starts within this random window, "
+                             "so users do not all begin at the same instant")
     parser.add_argument("--no-live", action="store_true",
                         help="plain periodic summaries instead of the live dashboard")
     parser.add_argument("--live", action="store_true",
