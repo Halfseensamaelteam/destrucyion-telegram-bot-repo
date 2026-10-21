@@ -85,6 +85,91 @@ def with_flood_wait_retry(max_retries: int = 3):
     return decorator
 
 
+_DOWNLOAD_PART_SIZE = 512 * 1024  # Telethon MAX_CHUNK_SIZE for GetFile
+
+
+async def download_media_parallel(
+    client,
+    source_message,
+    dest_dir: str,
+    *,
+    workers: int,
+    progress_callback=None,
+) -> str:
+    """Download a document with ``workers`` parallel connections.
+
+    Telethon's ``download_media`` pulls a file through a single
+    connection; on a fast link that one stream is the bottleneck
+    (~1.5 MB/s measured on a VPS for a 10 MB video). Telegram serves
+    byte ranges, so the file is split into 512 KiB parts and ``workers``
+    ``iter_download`` iterators fetch interleaved parts concurrently
+    (offset = worker * part, stride = workers * part) — each iterator
+    holds its own connection to the file's DC. Parts land at their exact
+    offsets in one preallocated file, so assembly is just verification
+    of the final size.
+
+    Only for documents with a known size. Raises on any failure —
+    callers fall back to the plain sequential download.
+    """
+    import os
+
+    file_info = getattr(source_message, "file", None)
+    total = getattr(file_info, "size", None)
+    if not total:
+        raise SavedMessagesForwardError("parallel download needs a known file size")
+
+    name = getattr(file_info, "name", None) or f"document{getattr(file_info, 'ext', '') or '.bin'}"
+    dest_path = os.path.join(dest_dir, name)
+    part = _DOWNLOAD_PART_SIZE
+    chunk_count = (total + part - 1) // part
+    workers = max(1, min(workers, chunk_count))
+
+    # Preallocate so every worker can write at its own offsets.
+    with open(dest_path, "wb") as fh:
+        fh.truncate(total)
+
+    received = 0
+
+    async def _worker(worker_index: int) -> None:
+        nonlocal received
+        offset = worker_index * part
+        handle = open(dest_path, "r+b")
+        try:
+            position = offset
+            async for chunk in client.iter_download(
+                source_message,
+                offset=offset,
+                stride=workers * part,
+                chunk_size=part,
+                request_size=part,
+            ):
+                if not chunk:
+                    break
+                handle.seek(position)
+                handle.write(chunk)
+                position += workers * part
+                received += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(received, total)
+        finally:
+            handle.close()
+
+    results = await asyncio.gather(
+        *(_worker(i) for i in range(workers)), return_exceptions=True
+    )
+    for result in results:
+        if isinstance(result, Exception):
+            raise SavedMessagesForwardError(
+                f"parallel download failed: {result}"
+            ) from result
+
+    if os.path.getsize(dest_path) != total or received != total:
+        raise SavedMessagesForwardError(
+            f"parallel download size mismatch: got {received}, expected {total}"
+        )
+    return dest_path
+
+
 def _make_progress_logger(phase: str, account_id: int):
     """Build a Telethon progress_callback that logs at 25% steps.
 
@@ -276,6 +361,64 @@ class SavedMessagesService:
             file_path=None,
         )
 
+    async def _download(
+        self, source_message, tmp_dir: str, total_size, progress_callback
+    ) -> str | None:
+        """Download the source media into ``tmp_dir``.
+
+        Uses the parallel multi-connection downloader for documents at
+        or above the configured size threshold, and Telethon's plain
+        sequential ``download_media`` otherwise — and as an automatic
+        fallback when the parallel attempt fails for any reason, so a
+        parallel-download problem can never make a save fail that the
+        old path would have completed.
+        """
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        workers = max(1, settings.download_workers)
+        if (
+            workers > 1
+            and isinstance(total_size, int)
+            and total_size >= settings.download_parallel_min_bytes
+            and getattr(source_message, "document", None) is not None
+        ):
+            try:
+                path = await download_media_parallel(
+                    self._client,
+                    source_message,
+                    tmp_dir,
+                    workers=workers,
+                    progress_callback=progress_callback,
+                )
+                log.info(
+                    "saved_messages_parallel_download_used",
+                    account_id=self._account_id,
+                    workers=workers,
+                    size_bytes=total_size,
+                )
+                return path
+            except Exception as exc:
+                log.warning(
+                    "saved_messages_parallel_download_failed_falling_back",
+                    account_id=self._account_id,
+                    error=str(exc),
+                )
+                # Remove any partial file so the sequential path starts
+                # clean and tmp cleanup stays accurate.
+                try:
+                    import glob
+
+                    for partial in glob.glob(os.path.join(tmp_dir, "*")):
+                        os.remove(partial)
+                except OSError:
+                    pass
+        return await self._client.download_media(
+            source_message,
+            file=tmp_dir,
+            progress_callback=progress_callback,
+        )
+
     @with_flood_wait_retry(max_retries=3)
     async def _try_resend(self, source_message, caption: str) -> ForwardResult:
         """Download the media, then upload it as a brand-new file.
@@ -303,10 +446,9 @@ class SavedMessagesService:
                 account_id=self._account_id,
                 size_bytes=total_size,
             )
-            file_path = await self._client.download_media(
-                source_message,
-                file=tmp_dir,
-                progress_callback=_make_progress_logger("download", self._account_id),
+            progress_cb = _make_progress_logger("download", self._account_id)
+            file_path = await self._download(
+                source_message, tmp_dir, total_size, progress_cb
             )
             if not file_path:
                 raise SavedMessagesForwardError(
