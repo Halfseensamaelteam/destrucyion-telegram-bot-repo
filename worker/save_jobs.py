@@ -16,6 +16,7 @@ from app.core.logging import get_logger
 from app.db.models.telegram_account import TelegramAccountStatus
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.services.private_channel_save import SaveLinkError, download_post_media
+from app.services.subscription import SubscriptionService
 
 log = get_logger(__name__)
 
@@ -63,8 +64,8 @@ async def consume_save_jobs(manager: Any, session_factory: Any) -> None:
 
             temp_dir = Path(tempfile.mkdtemp(prefix="destrucyion-save-"))
             try:
-                # Redis is an internal transport, but still verify the job's
-                # account ownership against the authoritative database.
+                # Redis is an internal transport, but verify ownership and
+                # subscription against the authoritative database.
                 async with session_factory() as db_session:
                     account = await TelegramAccountRepository(db_session).get_by_user_id(user_id)
                     if (
@@ -74,6 +75,10 @@ async def consume_save_jobs(manager: Any, session_factory: Any) -> None:
                     ):
                         raise SaveLinkError(
                             "Akun Telegram aktif yang sesuai tidak ditemukan untuk pengguna ini."
+                        )
+                    if not await SubscriptionService(db_session).check_active(user_id):
+                        raise SaveLinkError(
+                            "Subscription tidak aktif atau sudah kedaluwarsa. Aktifkan subscription sebelum menggunakan /save."
                         )
 
                 # Account clients connect asynchronously after manager.start().
