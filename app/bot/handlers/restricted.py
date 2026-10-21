@@ -59,6 +59,15 @@ async def save_link_command(
     # Strip the /save command itself when present.
     if text.startswith("/save"):
         text = text[len("/save"):].strip()
+    # Users also paste the Saved-Messages trigger (".get <link>") at the
+    # bot — accept it here too and store only the link itself.
+    from app.core.config import get_settings
+
+    trigger = (get_settings().restricted_trigger or "").strip()
+    if trigger and text.lower().startswith(trigger.lower()):
+        rest = text[len(trigger):].strip()
+        if rest:
+            text = rest
 
     parsed = parse_link(text)
     if parsed is None:
