@@ -18,7 +18,7 @@ the processor only ever uses the client belonging to that account row.
 import enum
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Integer, Text, func
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Integer, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.models.base import Base
@@ -61,6 +61,13 @@ class LinkRequest(Base):
     )
     result_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The bot's single status message for this request. The bot sends
+    # "Queued" first and stores its ids here; the worker then EDITS that
+    # same message (Working -> Done/Failed) instead of spamming the chat
+    # with a new message per state — the reference bot's pattern.
+    notify_chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    notify_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True

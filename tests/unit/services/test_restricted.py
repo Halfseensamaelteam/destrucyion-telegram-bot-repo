@@ -134,6 +134,53 @@ async def test_processor_saves_and_marks_done(db_session, user, account):
     assert fresh.result_count == 1
 
 
+async def test_notify_owner_edits_the_status_message(db_session, user, account):
+    """With notify ids on the row, status updates EDIT the bot's one
+    status message instead of sending new messages."""
+    from unittest.mock import patch
+
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+    from app.services.restricted import LinkRequestProcessor
+
+    repo = LinkRequestRepository(db_session)
+    request = await repo.create(
+        user_id=user.id,
+        telegram_account_id=account.id,
+        raw_link="https://t.me/chan/1",
+        notify_chat_id=555,
+        notify_message_id=777,
+    )
+    await db_session.commit()
+    fresh = await repo.get_by_id(request.id)
+    assert fresh.notify_chat_id == 555
+    assert fresh.notify_message_id == 777
+
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(factory, MagicMock(), process_message=AsyncMock())
+
+    fake_notifier = MagicMock()
+    fake_notifier.edit_text = AsyncMock()
+    fake_notifier.send_text = AsyncMock()
+    with patch(
+        "app.services.telegram_notifier.TelegramNotifier",
+        return_value=fake_notifier,
+    ):
+        await processor._notify_owner(fresh, "✅ Done")
+
+    fake_notifier.edit_text.assert_awaited_once_with(
+        chat_id=555, message_id=777, text="✅ Done"
+    )
+    fake_notifier.send_text.assert_not_awaited()
+
+
+async def test_processor_poll_interval_defaults_to_settings(db_session):
+    from app.services.restricted import LinkRequestProcessor
+
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(factory, MagicMock(), process_message=AsyncMock())
+    assert processor._poll_interval == 3.0
+
+
 async def test_stale_processing_requests_are_reset(db_session, user, account):
     """A request left in PROCESSING by a stopped worker must return to
     PENDING at startup, or it would never be retried."""

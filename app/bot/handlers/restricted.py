@@ -94,18 +94,20 @@ async def save_link_command(
         )
         return
 
+    # ONE status message per request: the bot sends "Queued" now and the
+    # worker EDITS this same message as the state changes (Working ->
+    # Done/Failed) instead of posting a new message per state. Its ids
+    # ride along on the queue row so the worker can find it.
+    status_msg = await update.message.reply_text("⏳ Queued…")
     link_repo = LinkRequestRepository(session)
     await link_repo.create(
         user_id=user.id,
         telegram_account_id=account.id,
         raw_link=text,
+        notify_chat_id=status_msg.chat_id,
+        notify_message_id=status_msg.message_id,
     )
     log.info("link_request_queued", user_id=user.id, account_id=account.id)
-    await update.message.reply_text(
-        "⏳ Queued. Your account will fetch it in the background and the "
-        "copy will appear in your Saved Messages. I will confirm here when "
-        "it is done."
-    )
 
 
 async def save_link_message(

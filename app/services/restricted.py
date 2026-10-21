@@ -203,11 +203,15 @@ class LinkRequestProcessor:
         manager,
         *,
         process_message: ProcessMessageFn,
-        poll_interval: float = 15.0,
+        poll_interval: float | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._manager = manager
         self._process_message = process_message
+        if poll_interval is None:
+            from app.core.config import get_settings
+
+            poll_interval = get_settings().link_request_poll_seconds
         self._poll_interval = poll_interval
 
     async def run_forever(self) -> None:
@@ -288,8 +292,7 @@ class LinkRequestProcessor:
             # exactly like failure.
             await self._notify_owner(
                 request,
-                "⏳ Working on it — downloading now. Large videos can take a "
-                "few minutes; the copy will appear in your Saved Messages.",
+                "⏳ Working on it — downloading now…",
             )
             saved = await self._save_ref(client, request, parsed, settings)
             await _set_status(LinkRequestStatus.DONE, result_count=saved)
@@ -334,21 +337,41 @@ class LinkRequestProcessor:
         return saved
 
     async def _notify_owner(self, request, text: str) -> None:
-        """Best-effort Bot API notice to the requesting user.
+        """Best-effort Bot API status update for the requesting user.
 
-        The saved content itself lands in the owner's Saved Messages via
-        their own client; this is only a courtesy ping in the bot chat.
-        Failure here never changes the request outcome.
+        One status message per request: when the queue row carries the
+        bot's status-message ids, the message is EDITED in place
+        (Queued -> Working -> Done/Failed); rows without ids (queued
+        before this existed) fall back to a plain new message. The saved
+        content itself lands in the owner's Saved Messages via their own
+        client — this is only the courtesy status in the bot chat, and
+        failure here never changes the request outcome.
         """
         try:
             from app.db.repositories.user_repo import UserRepository
             from app.services.telegram_notifier import TelegramNotifier
 
+            notifier = TelegramNotifier()
+            chat_id = getattr(request, "notify_chat_id", None)
+            message_id = getattr(request, "notify_message_id", None)
+            if chat_id and message_id:
+                try:
+                    await notifier.edit_text(
+                        chat_id=chat_id, message_id=message_id, text=text
+                    )
+                    return
+                except Exception as exc:
+                    # Deleted message / too old to edit — fall through to
+                    # a fresh message so the owner still hears the result.
+                    log.debug(
+                        "link_request_status_edit_failed",
+                        request_id=request.id,
+                        error=str(exc),
+                    )
             async with self._session_factory() as session:
                 user = await UserRepository(session).get_by_id(request.user_id)
             if user is None:
                 return
-            notifier = TelegramNotifier()
             await notifier.send_text(telegram_user_id=user.telegram_user_id, text=text)
         except Exception as exc:
             log.debug("link_request_notify_failed", request_id=request.id, error=str(exc))
