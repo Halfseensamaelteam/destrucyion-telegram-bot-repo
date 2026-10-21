@@ -8,9 +8,18 @@ What this exercises (all real production code):
   (including the parallel multi-connection downloader).
 
 What is fake: only the Telegram network side. Each account gets a
-FakeTelegramClient that serves one fixed "video" of --file-mb megabytes
-at a simulated per-connection rate, and accepts uploads at a simulated
-rate. No real Telegram account, session, or network is involved.
+FakeTelegramClient serving "videos" at simulated per-connection rates
+(each account's rate is jittered, like real users on different links).
+No real Telegram account, session, or network is involved.
+
+Workload: every account saves a random number of videos, each of a
+random size in [--file-min-mb, --file-max-mb] — accounts work through
+their own queues independently, so at any moment one user may be
+downloading 180 MB while another finishes a 30 MB one.
+
+Display: a live terminal dashboard (account wall + per-transfer
+progress bars) when stdout is a TTY; plain periodic summary lines
+otherwise (e.g. docker logs). --no-live forces the plain mode.
 
 What this proves: queue/claim/concurrency behaviour and throughput of
 OUR code at --accounts scale. What it cannot prove: real Telegram
@@ -24,19 +33,18 @@ Use a scratch database and pass --confirm-scratch-db to prove you read
 this. Default is a throwaway SQLite file (loadtest.db in the cwd).
 
 Examples:
-  # quick smoke: 10 accounts, one 20 MB video each
+  # quick smoke: 10 accounts, mixed 5-12 MB videos
   python scripts/load_test_link_queue.py --confirm-scratch-db \
-      --accounts 10 --file-mb 20
+      --accounts 10 --file-min-mb 5 --file-max-mb 12 --requests-per-account 2-3
 
-  # the 100-account run, against a scratch PostgreSQL on the VPS
+  # the 100-user run, against a scratch PostgreSQL on the VPS
   python scripts/load_test_link_queue.py --confirm-scratch-db \
-      --accounts 100 --file-mb 50 \
+      --accounts 100 --file-min-mb 30 --file-max-mb 200 \
       --database-url postgresql+asyncpg://user:pass@127.0.0.1/loadtest
 
 Rates are PER CONNECTION (each of the DOWNLOAD_WORKERS streams of a
-file, and each upload). Aggregate simulated bandwidth is therefore
-streams x rate; absolute wall-times are simulated, the concurrency
-behaviour and queue correctness are real.
+file, and each upload), jittered per account. Absolute wall-times are
+simulated; the concurrency behaviour and queue correctness are real.
 """
 
 from __future__ import annotations
@@ -44,9 +52,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import random
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -61,6 +70,20 @@ os.environ.setdefault("RESTRICTED_BATCH_DELAY_SECONDS", "0")
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 CHUNK = 512 * 1024  # matches the parallel downloader's part size
+MB = 1024 * 1024
+# Shared cyclic payload: byte CONTENT is never verified by the pipeline
+# (sizes are), so one 4 MB pattern can stand in for any file size.
+_PAYLOAD = (b"destrucyion-loadtest!" * (4 * MB // 21 + 1))[: 4 * MB]
+
+
+def _slice(pos: int, n: int) -> bytes:
+    """n payload bytes starting at absolute position pos (cyclic)."""
+    start = pos % len(_PAYLOAD)
+    first = _PAYLOAD[start:start + n]
+    if len(first) == n:
+        return first
+    reps = (n - len(first)) // len(_PAYLOAD) + 1
+    return (first + _PAYLOAD * reps)[:n]
 
 
 @dataclass
@@ -73,6 +96,23 @@ class Stats:
     bytes_up: int = 0
     uploads: int = 0
     sent_ids: int = 0
+
+
+@dataclass
+class AccountState:
+    """Live per-account view for the dashboard."""
+
+    account_id: int
+    planned: int = 0
+    done: int = 0
+    failed: int = 0
+    phase: str = "WAIT"  # WAIT | DOWN | UP
+    current_total: int = 0
+    current_done: int = 0
+    total_bytes: int = 0  # down + up, cumulative — sampled for rate
+    last_sample_bytes: int = 0
+    last_sample_at: float = 0.0
+    rate_bps: float = 0.0
 
 
 class FakeFile:
@@ -90,7 +130,7 @@ class FakeMessage:
     types so classify_message() and the resend path treat it exactly
     like a genuine channel post."""
 
-    def __init__(self, payload_size: int) -> None:
+    def __init__(self, payload_size: int, msg_id: int = 1) -> None:
         from telethon.tl.types import (
             Document,
             DocumentAttributeFilename,
@@ -115,7 +155,7 @@ class FakeMessage:
             ],
         )
         self.media = MessageMediaDocument(document=self.document, ttl_seconds=None)
-        self.id = 1
+        self.id = msg_id
         self.chat_id = -1001234567890
         self.message = "load test caption"
         self.noforwards = True  # restricted content -> download+upload path
@@ -133,18 +173,35 @@ class FakeMessage:
 
 
 class FakeTelegramClient:
-    """Serves one fixed video at a simulated per-connection rate."""
+    """Serves videos of per-message sizes at a simulated rate.
 
-    def __init__(self, stats: Stats, message: FakeMessage, payload: bytes,
-                 download_bps: float, upload_bps: float) -> None:
+    ``sizes`` maps message id -> file size in bytes; the processor's
+    link for a request encodes the message id, so each queued request
+    fetches its own planned size.
+    """
+
+    def __init__(self, stats: Stats, state: AccountState,
+                 sizes: dict[int, int], download_bps: float,
+                 upload_bps: float) -> None:
         self._stats = stats
-        self._message = message
-        self._payload = payload
+        self._state = state
+        self._sizes = sizes
+        self._messages: dict[int, FakeMessage] = {}
         self._download_bps = download_bps
         self._upload_bps = upload_bps
 
+    def _message_for(self, msg_id: int) -> FakeMessage:
+        if msg_id not in self._messages:
+            self._messages[msg_id] = FakeMessage(self._sizes[msg_id], msg_id)
+        return self._messages[msg_id]
+
     async def get_messages(self, peer, ids=None):
-        return self._message
+        message = self._message_for(int(ids))
+        st = self._state
+        st.phase = "DOWN"
+        st.current_total = self._sizes[int(ids)]
+        st.current_done = 0
+        return message
 
     async def _pace(self, nbytes: int, bps: float) -> None:
         if bps > 0:
@@ -152,9 +209,8 @@ class FakeTelegramClient:
 
     def iter_download(self, source, *, offset=0, stride=None,
                       chunk_size=None, request_size=None):
-        stats = self._stats
-        payload = self._payload
-        total = len(payload)
+        stats, st = self._stats, self._state
+        total = st.current_total
         step = request_size or CHUNK
         bps = self._download_bps
 
@@ -165,10 +221,11 @@ class FakeTelegramClient:
                 pos = offset
                 while pos < total:
                     end = min(pos + step, total)
-                    chunk = payload[pos:end]
-                    await self._pace(len(chunk), bps)
-                    stats.bytes_down += len(chunk)
-                    yield chunk
+                    await self._pace(end - pos, bps)
+                    stats.bytes_down += end - pos
+                    st.current_done += end - pos
+                    st.total_bytes += end - pos
+                    yield _slice(pos, end - pos)
                     pos = pos + stride if stride else end
             finally:
                 stats.active_streams -= 1
@@ -179,24 +236,25 @@ class FakeTelegramClient:
                              progress_callback=None, **kwargs):
         if thumb is not None:
             return None  # no thumbnail in the fake world
-        stats = self._stats
+        stats, st = self._stats, self._state
+        total = st.current_total
+        dest = file
+        if dest is None:
+            return None
+        if os.path.isdir(dest):
+            dest = os.path.join(dest, "loadtest.mp4")
         stats.active_streams += 1
         stats.max_streams = max(stats.max_streams, stats.active_streams)
         try:
-            dest = file
-            if dest is None:
-                return None
-            if os.path.isdir(dest):
-                dest = os.path.join(dest, "loadtest.mp4")
             pos = 0
-            total = len(self._payload)
             with open(dest, "wb") as fh:
                 while pos < total:
                     end = min(pos + CHUNK, total)
-                    chunk = self._payload[pos:end]
-                    await self._pace(len(chunk), self._download_bps)
-                    fh.write(chunk)
-                    stats.bytes_down += len(chunk)
+                    await self._pace(end - pos, self._download_bps)
+                    fh.write(_slice(pos, end - pos))
+                    stats.bytes_down += end - pos
+                    st.current_done += end - pos
+                    st.total_bytes += end - pos
                     if progress_callback is not None:
                         progress_callback(end, total)
                     pos = end
@@ -205,23 +263,28 @@ class FakeTelegramClient:
             stats.active_streams -= 1
 
     async def send_file(self, **kwargs):
-        stats = self._stats
+        stats, st = self._stats, self._state
         path = kwargs.get("file")
         size = os.path.getsize(path) if path and os.path.exists(path) else 0
+        st.phase = "UP"
+        st.current_total = size
+        st.current_done = 0
         stats.active_uploads += 1
         stats.max_uploads = max(stats.max_uploads, stats.active_uploads)
         try:
-            # Pace in chunks so concurrent uploads interleave realistically.
             remaining = size
             while remaining > 0:
                 step = min(CHUNK, remaining)
                 await self._pace(step, self._upload_bps)
                 stats.bytes_up += step
+                st.current_done += step
+                st.total_bytes += step
                 remaining -= step
         finally:
             stats.active_uploads -= 1
         stats.uploads += 1
         stats.sent_ids += 1
+        st.phase = "WAIT"
         return SimpleNamespace(id=900000 + stats.sent_ids)
 
 
@@ -248,6 +311,120 @@ async def _no_notify(self, request, text) -> None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+def _bar(done: int, total: int, width: int = 18) -> str:
+    if total <= 0:
+        return " " * width
+    filled = min(width, int(width * min(done, total) / total))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _symbol(st: AccountState) -> str:
+    if st.failed > 0 and st.done + st.failed >= st.planned:
+        return "✗"
+    if st.done + st.failed >= st.planned and st.planned > 0:
+        return "✓"
+    if st.phase == "DOWN":
+        return "D"
+    if st.phase == "UP":
+        return "U"
+    return "·"
+
+
+def _render(states: list[AccountState], stats: Stats, *, started: float,
+            total_requests: int, db_counts: dict) -> str:
+    now = time.monotonic()
+    elapsed = now - started
+    done_n = sum(s.done for s in states)
+    failed_n = sum(s.failed for s in states)
+    lines = []
+    lines.append("═" * 78)
+    lines.append(
+        f" LOAD TEST  elapsed {elapsed:6.1f}s   "
+        f"done {done_n}/{total_requests}   failed {failed_n}   "
+        f"queue pending {db_counts.get('pending', '?')}  "
+        f"processing {db_counts.get('processing', '?')}"
+    )
+    lines.append(
+        f" traffic    ↓ {stats.bytes_down / MB:9.1f} MB   ↑ {stats.bytes_up / MB:9.1f} MB   "
+        f"streams {stats.active_streams} (max {stats.max_streams})   "
+        f"uploads {stats.active_uploads} (max {stats.max_uploads})"
+    )
+    lines.append("─" * 78)
+    lines.append(" users:  ✓ done   D downloading   U uploading   · waiting   ✗ failed")
+    wall = [_symbol(s) for s in states]
+    for i in range(0, len(wall), 50):
+        lines.append(" " + " ".join(wall[i:i + 50]))
+    lines.append("─" * 78)
+    active = [s for s in states if s.phase in ("DOWN", "UP")]
+    active.sort(key=lambda s: s.account_id)
+    for s in active[:14]:
+        if s.last_sample_at:
+            dt = max(now - s.last_sample_at, 0.001)
+            s.rate_bps = 0.6 * s.rate_bps + 0.4 * (
+                (s.total_bytes - s.last_sample_bytes) / dt
+            )
+        s.last_sample_bytes = s.total_bytes
+        s.last_sample_at = now
+        shown_done = min(s.current_done, s.current_total)
+        pct = (100 * shown_done / s.current_total) if s.current_total else 0
+        lines.append(
+            f" acc {s.account_id:>4}  {s.phase:<4} "
+            f"{shown_done / MB:7.1f}/{s.current_total / MB:6.1f} MB  "
+            f"[{_bar(s.current_done, s.current_total)}] {pct:5.1f}%  "
+            f"{s.rate_bps / MB:5.1f} MB/s  (selesai {s.done}/{s.planned})"
+        )
+    if len(active) > 14:
+        lines.append(f" …dan {len(active) - 14} user aktif lainnya")
+    if not active:
+        lines.append(" (tidak ada transfer aktif saat ini)")
+    lines.append("═" * 78)
+    return "\n".join(lines)
+
+
+async def _dashboard(states, stats, *, started, total_requests, live: bool,
+                     db_counts: dict, stop: asyncio.Event) -> None:
+    if live:
+        sys.stdout.write("\033[?25l")  # hide cursor
+        try:
+            while not stop.is_set():
+                frame = _render(states, stats, started=started,
+                                total_requests=total_requests, db_counts=db_counts)
+                sys.stdout.write("\033[H\033[2J" + frame + "\n")
+                sys.stdout.flush()
+                await asyncio.sleep(0.5)
+        finally:
+            sys.stdout.write("\033[?25h\033[H\033[2J")
+            sys.stdout.flush()
+    else:
+        while not stop.is_set():
+            done_n = sum(s.done for s in states)
+            failed_n = sum(s.failed for s in states)
+            elapsed = time.monotonic() - started
+            print(
+                f"[{elapsed:7.1f}s] done {done_n}/{total_requests} failed {failed_n} "
+                f"pending {db_counts.get('pending', '?')} "
+                f"↓ {stats.bytes_down / MB:.0f} MB ↑ {stats.bytes_up / MB:.0f} MB "
+                f"streams {stats.active_streams} uploads {stats.active_uploads}",
+                flush=True,
+            )
+            await asyncio.sleep(5)
+
+
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+
+def _parse_range(text: str) -> tuple[int, int]:
+    if "-" in text:
+        lo, hi = text.split("-", 1)
+        return int(lo), int(hi)
+    return int(text), int(text)
+
+
 async def run(args: argparse.Namespace) -> int:
     from sqlalchemy import func, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -263,33 +440,36 @@ async def run(args: argparse.Namespace) -> int:
     from app.services.restricted import LinkRequestProcessor
     from app.telegram.events import _process_message
 
+    rng = random.Random(args.seed)
     settings = get_settings()
 
     # Temp-space preflight: every in-flight save holds one full temp
     # copy of the file (the downloader preallocates it), so the temp
-    # dir needs concurrency x file size free — running out of disk
+    # dir needs concurrency x largest file free — running out of disk
     # mid-transfer is exactly the failure this test would otherwise
     # report confusingly. (Same math applies to a production VPS.)
     import shutil
     import tempfile
 
     in_flight = min(settings.link_request_max_concurrency, args.accounts)
-    needed_mb = in_flight * args.file_mb * 1.5
+    needed_mb = in_flight * args.file_max_mb * 1.5
     free_mb = shutil.disk_usage(tempfile.gettempdir()).free / 1e6
     print(f"temp dir: {tempfile.gettempdir()}  free={free_mb:.0f} MB  "
-          f"needed~{needed_mb:.0f} MB ({in_flight} in flight x {args.file_mb} MB x1.5)")
+          f"needed~{needed_mb:.0f} MB ({in_flight} in flight x "
+          f"{args.file_max_mb} MB x1.5)")
     if free_mb < needed_mb:
         print("ERROR: not enough temp space for this run — lower --accounts/"
-              "--file-mb, raise LINK_REQUEST_MAX_CONCURRENCY down, or point "
+              "--file-max-mb, lower LINK_REQUEST_MAX_CONCURRENCY, or point "
               "TMPDIR at a bigger disk.")
         return 2
 
     print(f"database: {args.database_url}")
     print(f"accounts={args.accounts} requests/account={args.requests_per_account} "
-          f"file={args.file_mb} MB download={args.download_mbps} MB/s/conn "
-          f"upload={args.upload_mbps} MB/s queue_concurrency="
+          f"files {args.file_min_mb}-{args.file_max_mb} MB "
+          f"download={args.download_mbps} MB/s/conn upload={args.upload_mbps} MB/s "
+          f"(jittered per account) queue_concurrency="
           f"{settings.link_request_max_concurrency} download_workers="
-          f"{settings.download_workers}")
+          f"{settings.download_workers} seed={args.seed}")
 
     if args.database_url.startswith("sqlite"):
         from sqlalchemy import event
@@ -312,14 +492,16 @@ async def run(args: argparse.Namespace) -> int:
     factory = async_sessionmaker(bind=engine, class_=AsyncSession,
                                  expire_on_commit=False)
 
-    # ---- seed fake users/accounts + pending link requests -------------
-    file_size = int(args.file_mb * 1024 * 1024)
-    payload = (b"destrucyion-loadtest!" * (file_size // 21 + 1))[:file_size]
-    message = FakeMessage(file_size)
+    # ---- plan + seed ---------------------------------------------------
+    req_lo, req_hi = _parse_range(args.requests_per_account)
     stats = Stats()
     manager = FakeClientManager()
-    base_tg_id = 900_000_000 + int(time.time()) % 100_000
+    states: list[AccountState] = []
+    states_by_account: dict[int, AccountState] = {}
     request_ids: list[int] = []
+    request_account: dict[int, int] = {}
+    base_tg_id = 900_000_000 + int(time.time()) % 100_000
+    next_msg_id = 1
 
     async with factory() as session:
         user_repo = UserRepository(session)
@@ -332,53 +514,109 @@ async def run(args: argparse.Namespace) -> int:
                 phone_masked=f"+628****{i:04d}",
                 status=TelegramAccountStatus.ACTIVE,
             )
+            planned = rng.randint(req_lo, req_hi)
+            sizes: dict[int, int] = {}
+            st = AccountState(account_id=account.id, planned=planned)
+            states.append(st)
+            states_by_account[account.id] = st
+            jitter = rng.uniform(0.6, 1.6)
             manager.add(
                 account.id,
                 user.id,
                 FakeTelegramClient(
-                    stats, message, payload,
-                    download_bps=args.download_mbps * 1024 * 1024,
-                    upload_bps=args.upload_mbps * 1024 * 1024,
+                    stats, st, sizes,
+                    download_bps=args.download_mbps * MB * jitter,
+                    upload_bps=args.upload_mbps * MB * jitter,
                 ),
             )
-            for _ in range(args.requests_per_account):
+            for _ in range(planned):
+                size = int(rng.uniform(args.file_min_mb, args.file_max_mb) * MB)
+                sizes[next_msg_id] = size
                 row = await link_repo.create(
                     user_id=user.id,
                     telegram_account_id=account.id,
-                    raw_link="https://t.me/loadtestchan/1",
+                    raw_link=f"https://t.me/loadtestchan/{next_msg_id}",
                 )
                 request_ids.append(row.id)
+                request_account[row.id] = account.id
+                next_msg_id += 1
         await session.commit()
     total_requests = len(request_ids)
     print(f"seeded {total_requests} pending requests for {args.accounts} accounts")
 
-    # ---- drain the queue with the real processor ----------------------
+    # ---- drain the queue with the real processor + live dashboard ------
     processor = LinkRequestProcessor(factory, manager, process_message=_process_message)
     processor._notify_owner = _no_notify.__get__(processor, LinkRequestProcessor)
 
+    db_counts: dict[str, int] = {"pending": total_requests, "processing": 0}
+    stop = asyncio.Event()
     started = time.monotonic()
-    deadline = started + args.timeout
-    while time.monotonic() < deadline:
-        claimed = await processor.process_pending_once()
+    live = (not args.no_live) and sys.stdout.isatty()
+    if live:
+        # The pipeline's INFO logs would shred the dashboard; keep WARNING+.
+        import logging
+
+        logging.getLogger().setLevel(logging.WARNING)
+    dash = asyncio.create_task(
+        _dashboard(states, stats, started=started,
+                   total_requests=total_requests, live=live,
+                   db_counts=db_counts, stop=stop)
+    )
+
+    async def _refresh_counts() -> None:
         async with factory() as session:
-            counts = dict(
-                (await session.execute(
-                    select(LinkRequest.status, func.count())
-                    .where(LinkRequest.id.in_(request_ids))
-                    .group_by(LinkRequest.status)
-                )).all()
-            )
-        remaining = sum(
-            c for s, c in counts.items()
-            if s in (LinkRequestStatus.PENDING, LinkRequestStatus.PROCESSING)
-        )
-        if claimed == 0 and remaining == 0:
-            break
-        if claimed == 0:
-            await asyncio.sleep(0.25)
+            rows = (await session.execute(
+                select(LinkRequest.status, func.count())
+                .where(LinkRequest.id.in_(request_ids))
+                .group_by(LinkRequest.status)
+            )).all()
+            done_rows = (await session.execute(
+                select(LinkRequest.telegram_account_id, LinkRequest.status,
+                       func.count())
+                .where(LinkRequest.id.in_(request_ids))
+                .group_by(LinkRequest.telegram_account_id, LinkRequest.status)
+            )).all()
+        counts = dict(rows)
+        db_counts["pending"] = counts.get(LinkRequestStatus.PENDING, 0)
+        db_counts["processing"] = counts.get(LinkRequestStatus.PROCESSING, 0)
+        for st in states:
+            st.done = 0
+            st.failed = 0
+        for account_id, status, count in done_rows:
+            st = states_by_account.get(account_id)
+            if st is None:
+                continue
+            if status == LinkRequestStatus.DONE:
+                st.done = count
+            elif status == LinkRequestStatus.FAILED:
+                st.failed = count
+
+    async def _counts_loop() -> None:
+        while not stop.is_set():
+            try:
+                await _refresh_counts()
+            except Exception:
+                pass  # display bookkeeping must never break the drain
+            await asyncio.sleep(2)
+
+    counts_task = asyncio.create_task(_counts_loop())
+    deadline = started + args.timeout
+    try:
+        while time.monotonic() < deadline:
+            claimed = await processor.process_pending_once()
+            await _refresh_counts()
+            remaining = db_counts["pending"] + db_counts["processing"]
+            if claimed == 0 and remaining == 0:
+                break
+            if claimed == 0:
+                await asyncio.sleep(0.25)
+    finally:
+        stop.set()
+        await dash
+        counts_task.cancel()
     wall = time.monotonic() - started
 
-    # ---- report --------------------------------------------------------
+    # ---- final report ---------------------------------------------------
     async with factory() as session:
         rows = list((await session.execute(
             select(LinkRequest).where(LinkRequest.id.in_(request_ids))
@@ -386,6 +624,7 @@ async def run(args: argparse.Namespace) -> int:
     await engine.dispose()
 
     done = [r for r in rows if r.status == LinkRequestStatus.DONE]
+    done_empty = [r for r in done if not r.result_count]
     failed = [r for r in rows if r.status == LinkRequestStatus.FAILED]
     latencies = sorted(
         (r.processed_at - r.created_at).total_seconds()
@@ -399,18 +638,20 @@ async def run(args: argparse.Namespace) -> int:
         return latencies[min(len(latencies) - 1, int(len(latencies) * p))]
 
     print("\n================ LOAD TEST RESULT ================")
-    print(f"requests:        {total_requests}  done={len(done)}  failed={len(failed)}")
+    print(f"requests:        {total_requests}  done={len(done)} "
+          f"(empty={len(done_empty)})  failed={len(failed)}")
     print(f"wall time:       {wall:.1f}s  ({total_requests / max(wall, 0.001):.2f} req/s)")
     print(f"max download streams active at once: {stats.max_streams}")
     print(f"max uploads active at once:          {stats.max_uploads}")
-    print(f"bytes downloaded: {stats.bytes_down / 1e6:.1f} MB   "
-          f"uploaded: {stats.bytes_up / 1e6:.1f} MB   uploads: {stats.uploads}")
+    print(f"bytes downloaded: {stats.bytes_down / MB:.1f} MB   "
+          f"uploaded: {stats.bytes_up / MB:.1f} MB   uploads: {stats.uploads}")
     if latencies:
         print(f"per-request latency (queue->done): avg={sum(latencies)/len(latencies):.1f}s "
               f"p50={_pct(0.50):.1f}s p95={_pct(0.95):.1f}s max={latencies[-1]:.1f}s")
     if failed:
         print("first failure:", failed[0].error)
-    ok = len(done) == total_requests and stats.uploads == total_requests
+    ok = (len(done) == total_requests and not done_empty
+          and stats.uploads == total_requests)
     print("verdict:", "PASS — every request saved exactly once" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -418,23 +659,37 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--accounts", type=int, default=10)
-    parser.add_argument("--requests-per-account", type=int, default=1)
-    parser.add_argument("--file-mb", type=float, default=20)
+    parser.add_argument("--requests-per-account", default="1",
+                        help="'3' or a range like '2-5' (random per account)")
+    parser.add_argument("--file-mb", type=float, default=None,
+                        help="fixed file size; shorthand for min=max")
+    parser.add_argument("--file-min-mb", type=float, default=30)
+    parser.add_argument("--file-max-mb", type=float, default=200)
     parser.add_argument("--download-mbps", type=float, default=1.5,
                         help="simulated per-connection download MB/s")
     parser.add_argument("--upload-mbps", type=float, default=3.0,
                         help="simulated per-connection upload MB/s")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="random seed — same seed, same workload plan")
+    parser.add_argument("--no-live", action="store_true",
+                        help="plain periodic summaries instead of the live dashboard")
     parser.add_argument("--database-url", default="sqlite+aiosqlite:///./loadtest.db")
-    parser.add_argument("--timeout", type=float, default=1800)
+    parser.add_argument("--timeout", type=float, default=3600)
     parser.add_argument("--confirm-scratch-db", action="store_true",
                         help="required: confirms the target DB is a scratch DB")
     args = parser.parse_args()
+    if args.file_mb is not None:
+        args.file_min_mb = args.file_max_mb = args.file_mb
     if not args.confirm_scratch_db:
         parser.error("refusing to run without --confirm-scratch-db "
                      "(see the safety note in this file's docstring)")
     if args.database_url == "sqlite+aiosqlite:///./loadtest.db" and os.path.exists("loadtest.db"):
         os.remove("loadtest.db")  # our own default scratch file
-    sys.exit(asyncio.run(run(args)))
+    try:
+        sys.exit(asyncio.run(run(args)))
+    except KeyboardInterrupt:
+        print("\nstopped by user")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
