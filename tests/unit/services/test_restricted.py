@@ -134,6 +134,45 @@ async def test_processor_saves_and_marks_done(db_session, user, account):
     assert fresh.result_count == 1
 
 
+async def test_processor_reports_duplicates_honestly(db_session, user, account):
+    """A link whose post is already saved must be reported as 'already
+    there' (transfer skipped by idempotency), not as a fresh save."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+    from app.services.restricted import LinkRequestProcessor, RestrictedContentService
+
+    repo = LinkRequestRepository(db_session)
+    request = await repo.create(
+        user_id=user.id,
+        telegram_account_id=account.id,
+        raw_link="https://t.me/chan/42",
+    )
+    await db_session.commit()
+    request_id = request.id
+
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    processor = LinkRequestProcessor(
+        factory, manager, process_message=AsyncMock(return_value="duplicate")
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            RestrictedContentService,
+            "fetch_messages",
+            AsyncMock(return_value=[MagicMock(id=42)]),
+        )
+        processor._notify_owner = AsyncMock()
+        await processor.process_pending_once()
+
+    fresh = await LinkRequestRepository(db_session).get_by_id(request_id)
+    assert fresh.status == LinkRequestStatus.DONE
+    assert fresh.result_count == 1
+    notified = [call.args[1] for call in processor._notify_owner.await_args_list]
+    assert any("Already there" in text for text in notified), notified
+    assert not any(text.startswith("✅ Done") for text in notified), notified
+
+
 async def test_stale_processing_requests_are_reset(db_session, user, account):
     """A request left in PROCESSING by a stopped worker must return to
     PENDING at startup, or it would never be retried."""
