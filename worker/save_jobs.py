@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from app.core.logging import get_logger
+from app.db.models.telegram_account import TelegramAccountStatus
+from app.db.repositories.telegram_account_repo import TelegramAccountRepository
 from app.services.private_channel_save import SaveLinkError, download_post_media
 
 log = get_logger(__name__)
@@ -28,7 +30,7 @@ async def _set_result(redis, job_id: str, *, ok: bool, message: str) -> None:
 
 
 async def consume_save_jobs(manager: Any, session_factory: Any) -> None:
-    """Consume manual-save jobs while reusing the worker's managed account clients."""
+    """Consume jobs using the existing client for the owning Telegram account."""
     from app.core.redis import get_redis_client
 
     redis = get_redis_client()
@@ -50,9 +52,9 @@ async def consume_save_jobs(manager: Any, session_factory: Any) -> None:
                 job_id = str(job["job_id"])
                 account_id = int(job["account_id"])
                 user_id = int(job["user_id"])
-                link = str(job["link"])
-                if not link:
-                    raise ValueError("empty link")
+                link = str(job["link"]).strip()
+                if not job_id or not link:
+                    raise ValueError("missing job id or link")
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 log.warning("save_job_invalid_payload", error_type=type(exc).__name__)
                 if job_id != "unknown":
@@ -61,7 +63,27 @@ async def consume_save_jobs(manager: Any, session_factory: Any) -> None:
 
             temp_dir = Path(tempfile.mkdtemp(prefix="destrucyion-save-"))
             try:
-                client = manager.get_client(account_id)
+                # Redis is an internal transport, but still verify the job's
+                # account ownership against the authoritative database.
+                async with session_factory() as db_session:
+                    account = await TelegramAccountRepository(db_session).get_by_user_id(user_id)
+                    if (
+                        account is None
+                        or int(account.id) != account_id
+                        or account.status != TelegramAccountStatus.ACTIVE
+                    ):
+                        raise SaveLinkError(
+                            "Akun Telegram aktif yang sesuai tidak ditemukan untuk pengguna ini."
+                        )
+
+                # Account clients connect asynchronously after manager.start().
+                # Give startup/reconnect a short window rather than failing immediately.
+                client = None
+                for _ in range(30):
+                    client = manager.get_client(account_id)
+                    if client is not None and client.is_connected():
+                        break
+                    await asyncio.sleep(1)
                 if client is None or not client.is_connected():
                     raise SaveLinkError(
                         "Akun Telegram belum terhubung di worker. Pastikan worker berjalan dan coba lagi."
