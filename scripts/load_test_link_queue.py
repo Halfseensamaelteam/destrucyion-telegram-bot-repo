@@ -107,6 +107,69 @@ class Stats:
 
 
 @dataclass
+class ResourceStats:
+    """This process's own resource usage, sampled during the drain.
+
+    Linux /proc based (the harness runs in a Linux container): RSS from
+    /proc/self/statm, CPU from /proc/self/stat utime+stime. CPU percent
+    is relative to ONE core (100% = one core fully busy).
+    """
+
+    samples: int = 0
+    rss_peak_mb: float = 0.0
+    rss_sum_mb: float = 0.0
+    cpu_max_pct: float = 0.0
+    cpu_sum_pct: float = 0.0
+    cpu_seconds: float = 0.0
+    _last_cpu_s: float | None = None
+    _last_at: float | None = None
+
+    @staticmethod
+    def _read() -> tuple[float, float] | None:
+        try:
+            with open("/proc/self/statm") as fh:
+                statm = fh.read().split()
+            rss_mb = int(statm[1]) * os.sysconf("SC_PAGE_SIZE") / MB
+            with open("/proc/self/stat") as fh:
+                stat = fh.read()
+            # comm may contain spaces/parens — fields after the last ')'
+            fields = stat[stat.rfind(")") + 2:].split()
+            ticks = int(fields[11]) + int(fields[12])  # utime + stime
+            cpu_s = ticks / os.sysconf("SC_CLK_TCK")
+            return rss_mb, cpu_s
+        except Exception:
+            return None
+
+    def sample(self) -> None:
+        got = self._read()
+        if got is None:
+            return
+        rss_mb, cpu_s = got
+        now = time.monotonic()
+        self.samples += 1
+        self.rss_peak_mb = max(self.rss_peak_mb, rss_mb)
+        self.rss_sum_mb += rss_mb
+        if self._last_cpu_s is not None and self._last_at is not None:
+            dt = now - self._last_at
+            if dt > 0:
+                pct = 100.0 * (cpu_s - self._last_cpu_s) / dt
+                self.cpu_max_pct = max(self.cpu_max_pct, pct)
+                self.cpu_sum_pct += pct
+        self.cpu_seconds = cpu_s
+        self._last_cpu_s = cpu_s
+        self._last_at = now
+
+    @property
+    def rss_avg_mb(self) -> float:
+        return self.rss_sum_mb / self.samples if self.samples else 0.0
+
+    @property
+    def cpu_avg_pct(self) -> float:
+        timed = max(0, self.samples - 1)
+        return self.cpu_sum_pct / timed if timed else 0.0
+
+
+@dataclass
 class AccountState:
     """Live per-account view for the dashboard."""
 
@@ -843,6 +906,15 @@ async def run(args: argparse.Namespace) -> int:
 
     counts_task = asyncio.create_task(_counts_loop())
 
+    resources = ResourceStats()
+
+    async def _resource_loop() -> None:
+        while not stop.is_set():
+            resources.sample()
+            await asyncio.sleep(0.5)
+
+    resource_task = asyncio.create_task(_resource_loop())
+
     deadline = started + args.timeout
     try:
         while time.monotonic() < deadline:
@@ -860,6 +932,7 @@ async def run(args: argparse.Namespace) -> int:
         stop.set()
         await dash
         counts_task.cancel()
+        resource_task.cancel()
         for _sig in (_signal.SIGINT, _signal.SIGTERM):
             try:
                 loop.remove_signal_handler(_sig)
@@ -901,6 +974,12 @@ async def run(args: argparse.Namespace) -> int:
     print(f"max uploads active at once:          {stats.max_uploads}")
     print(f"bytes downloaded: {stats.bytes_down / MB:.1f} MB   "
           f"uploaded: {stats.bytes_up / MB:.1f} MB   uploads: {stats.uploads}")
+    if resources.samples:
+        print(f"resources (proses ini): RAM peak {resources.rss_peak_mb:.1f} MB   "
+              f"RAM avg {resources.rss_avg_mb:.1f} MB   "
+              f"CPU max {resources.cpu_max_pct:.0f}%   "
+              f"CPU avg {resources.cpu_avg_pct:.0f}%   "
+              f"(total CPU {resources.cpu_seconds:.1f}s, 1 core = 100%)")
     if latencies:
         print(f"per-request latency (queue->done): avg={sum(latencies)/len(latencies):.1f}s "
               f"p50={_pct(0.50):.1f}s p95={_pct(0.95):.1f}s max={latencies[-1]:.1f}s")
