@@ -144,6 +144,23 @@ class Settings(BaseSettings):
             "are additionally retried by SavedMessagesService."
         ),
     )
+    download_workers: int = Field(
+        default=4,
+        description=(
+            "Parallel connections used to download a document for the "
+            "download+upload resend path. Telethon's plain download_media "
+            "uses ONE connection (~1.5 MB/s observed on a VPS); splitting "
+            "the file across workers multiplies throughput on fast links. "
+            "Set to 1 to disable parallel downloading."
+        ),
+    )
+    download_parallel_min_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        description=(
+            "Files smaller than this skip the parallel downloader — the "
+            "connection setup overhead is not worth it for small media."
+        ),
+    )
     display_timezone: str = Field(
         default="UTC",
         description=(
