@@ -48,6 +48,27 @@ class LinkRequestRepository:
         )
         return list(result.scalars().all())
 
+    async def reset_processing_to_pending(self) -> int:
+        """Return stale PROCESSING rows to PENDING; returns how many.
+
+        Called once when the worker's processor starts: this processor is
+        the only consumer, so any row still marked PROCESSING at startup
+        belongs to a run that was stopped/crashed mid-request and would
+        otherwise never be retried (list_pending only selects PENDING).
+        """
+        result = await self._session.execute(
+            select(LinkRequest).where(
+                LinkRequest.status == LinkRequestStatus.PROCESSING
+            )
+        )
+        rows = list(result.scalars().all())
+        for row in rows:
+            row.status = LinkRequestStatus.PENDING
+            row.error = None
+        if rows:
+            await self._session.flush()
+        return len(rows)
+
     async def mark(
         self,
         request: LinkRequest,

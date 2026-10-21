@@ -134,6 +134,27 @@ async def test_processor_saves_and_marks_done(db_session, user, account):
     assert fresh.result_count == 1
 
 
+async def test_stale_processing_requests_are_reset(db_session, user, account):
+    """A request left in PROCESSING by a stopped worker must return to
+    PENDING at startup, or it would never be retried."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+
+    repo = LinkRequestRepository(db_session)
+    request = await repo.create(
+        user_id=user.id,
+        telegram_account_id=account.id,
+        raw_link="https://t.me/chan/1",
+    )
+    await repo.mark(request, status=LinkRequestStatus.PROCESSING)
+    await db_session.commit()
+
+    reset = await repo.reset_processing_to_pending()
+    assert reset == 1
+    fresh = await repo.get_by_id(request.id)
+    assert fresh.status == LinkRequestStatus.PENDING
+
+
 async def test_processor_marks_failed_without_client(db_session, user, account):
     from app.db.models.link_request import LinkRequestStatus
     from app.db.repositories.link_request_repo import LinkRequestRepository

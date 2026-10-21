@@ -213,6 +213,19 @@ class LinkRequestProcessor:
     async def run_forever(self) -> None:
         """Poll until cancelled (worker shutdown cancels this task)."""
         log.info("link_request_processor_started", interval=self._poll_interval)
+        # A previous run may have died mid-request, leaving rows stuck in
+        # PROCESSING forever — return them to the queue before polling.
+        try:
+            from app.db.repositories.link_request_repo import LinkRequestRepository
+
+            async with self._session_factory() as session:
+                repo = LinkRequestRepository(session)
+                reset = await repo.reset_processing_to_pending()
+                if reset:
+                    await session.commit()
+                    log.info("link_requests_stale_reset", count=reset)
+        except Exception as exc:  # never block startup on the reset
+            log.warning("link_requests_stale_reset_failed", error=str(exc))
         while True:
             try:
                 await self.process_pending_once()
@@ -270,6 +283,14 @@ class LinkRequestProcessor:
                 )
                 return
 
+            # Tell the owner the moment work actually starts — a large
+            # video download+upload can take minutes, and silence reads
+            # exactly like failure.
+            await self._notify_owner(
+                request,
+                "⏳ Working on it — downloading now. Large videos can take a "
+                "few minutes; the copy will appear in your Saved Messages.",
+            )
             saved = await self._save_ref(client, request, parsed, settings)
             await _set_status(LinkRequestStatus.DONE, result_count=saved)
             await self._notify_owner(
