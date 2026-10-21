@@ -15,6 +15,7 @@ from app.core.redis import get_redis_client
 from app.db.models.telegram_account import TelegramAccountStatus
 from app.db.models.user import User
 from app.db.repositories.telegram_account_repo import TelegramAccountRepository
+from app.services.subscription import SubscriptionService
 
 log = get_logger(__name__)
 
@@ -54,6 +55,12 @@ async def save_command(
         return
     if not account.session_ciphertext:
         await message.reply_text("Session Telegram tidak tersedia. Jalankan /connect kembali.")
+        return
+
+    if not await SubscriptionService(session).check_active(user.id):
+        await message.reply_text(
+            "Subscription kamu tidak aktif atau sudah kedaluwarsa. Aktifkan subscription sebelum menggunakan /save."
+        )
         return
 
     redis = get_redis_client()
