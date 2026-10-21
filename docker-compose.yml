@@ -59,6 +59,9 @@ services:
     env_file:
       - .env
     environment:
+      # docker-entrypoint.sh dispatches on SERVICE_ROLE and ignores the
+      # compose command — without this the bot container runs the web app.
+      - SERVICE_ROLE=bot
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-destrucyion}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
@@ -80,6 +83,8 @@ services:
     env_file:
       - .env
     environment:
+      # See the bot service: SERVICE_ROLE decides what actually runs.
+      - SERVICE_ROLE=worker
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/${DB_NAME:-destrucyion}
       - REDIS_URL=redis://redis:6379/0
     depends_on:
