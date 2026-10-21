@@ -385,8 +385,10 @@ async def _process_message(
     """Capture + save a single message for a given account.
 
     Args:
-        force: True for manual saves — bypasses the timed-only filter and
-            retries a previously FAILED or interrupted (PENDING) record.
+        force: True for explicit saves (/save, bare link, Saved Messages
+            trigger) — bypasses the timed-only filter and always delivers
+            a copy, including re-sending an already-saved post and
+            retrying FAILED or interrupted (PENDING) records.
         capture_only_timed: If True, non-timed media is ignored — EXCEPT
             protected (noforwards) media when capture_protected_content
             is on: a protected post can never be fetched by forwarding
@@ -443,20 +445,21 @@ async def _process_message(
         record, created = await capture_svc.record(ctx)
         await session.commit()
 
-    if not created:
-        from app.db.models.media_record import MediaRecordStatus
-
-        # A manual/link save may retry something that FAILED earlier or is
-        # still PENDING — PENDING here means a previous attempt was cut off
-        # mid-transfer (worker stopped during a long download) and never
-        # actually saved anything, which RecoveryService likewise treats
-        # as incomplete. Everything else that exists is a true duplicate.
-        if not (
-            force
-            and record.status in (MediaRecordStatus.FAILED, MediaRecordStatus.PENDING)
-        ):
-            log.debug("media_already_known", account_id=account_id, record_id=record.id)
-            return "duplicate"
+    if not created and not force:
+        # Automatic capture path only: an already-known message is a
+        # duplicate to skip — this is what stops live-event replays and
+        # album bursts from spamming Saved Messages with copies, and it
+        # retries nothing (FAILED/PENDING records are RecoveryService's
+        # and the next explicit save's business).
+        #
+        # An explicit save (force: /save, a bare link, or the Saved
+        # Messages trigger) ALWAYS delivers a copy, even when this post
+        # was saved before — the owner asked for it by hand, so it is
+        # sent as-is with no duplicate check standing in the way. That
+        # also transparently retries FAILED records and finishes
+        # PENDING ones whose transfer was cut off mid-download.
+        log.debug("media_already_known", account_id=account_id, record_id=record.id)
+        return "duplicate"
 
     log.info(
         "media_captured",

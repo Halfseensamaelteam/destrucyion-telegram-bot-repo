@@ -256,6 +256,7 @@ async def test_pending_record_is_retried_on_force_save():
 
 
 async def test_duplicate_is_not_reprocessed():
+    """Automatic capture (force=False) skips an already-saved message."""
     record = MagicMock(id=5, status=MediaRecordStatus.SAVED)
     cap_instance = MagicMock()
     cap_instance.record = AsyncMock(return_value=(record, False))
@@ -269,11 +270,38 @@ async def test_duplicate_is_not_reprocessed():
             account_id=1,
             manager=make_manager(client=MagicMock()),
             session_factory=make_session_factory(),
-            force=True,
+            force=False,
             capture_only_timed=False,
         )
     assert outcome == "duplicate"
     fwd.assert_not_called()
+
+
+async def test_explicit_save_resends_an_already_saved_record():
+    """An explicit save (force=True: /save, bare link, .get trigger)
+    always delivers a copy — even when the post was saved before, it is
+    sent as-is with no duplicate check standing in the way."""
+    record = MagicMock(id=5, status=MediaRecordStatus.SAVED, ttl_seconds=None, media_type=MediaType.PHOTO)
+    cap_instance = MagicMock()
+    cap_instance.record = AsyncMock(return_value=(record, False))
+    cap_instance.mark_saved = AsyncMock()
+    fwd_instance = MagicMock()
+    fwd_instance.forward = AsyncMock(return_value=MagicMock(saved_message_id=88, was_resent=False))
+
+    with patch.object(ev, "classify_message", return_value=timed_info()), \
+         patch.object(ev, "_build_context", AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))), \
+         patch.object(ev, "MediaCaptureService", return_value=cap_instance), \
+         patch.object(ev, "SavedMessagesService", return_value=fwd_instance):
+        outcome = await ev._process_message(
+            message=MagicMock(),
+            account_id=1,
+            manager=make_manager(client=MagicMock()),
+            session_factory=make_session_factory(),
+            force=True,
+            capture_only_timed=False,
+        )
+    assert outcome == "saved"
+    fwd_instance.forward.assert_awaited_once()
 
 
 async def test_manual_save_retries_a_previously_failed_record():

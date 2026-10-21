@@ -291,26 +291,12 @@ class LinkRequestProcessor:
                 "⏳ Working on it — downloading now. Large videos can take a "
                 "few minutes; the copy will appear in your Saved Messages.",
             )
-            saved, duplicates = await self._save_ref(client, request, parsed, settings)
-            await _set_status(LinkRequestStatus.DONE, result_count=saved + duplicates)
-            if duplicates and not saved:
-                # Everything requested was already in Saved Messages and
-                # the transfer was skipped entirely (DB idempotency) —
-                # say so instead of a generic "Done", which reads exactly
-                # like a fresh save and confuses the owner.
-                text = (
-                    f"ℹ️ Already there: {duplicates} item(s) from your link were "
-                    "already in your Saved Messages, so nothing was downloaded "
-                    "again (duplicates are skipped by design)."
-                )
-            elif duplicates:
-                text = (
-                    f"✅ Done: {saved} new item(s) saved; {duplicates} were "
-                    "already in your Saved Messages."
-                )
-            else:
-                text = f"✅ Done: {saved} item(s) from your link are in your Saved Messages."
-            await self._notify_owner(request, text)
+            saved = await self._save_ref(client, request, parsed, settings)
+            await _set_status(LinkRequestStatus.DONE, result_count=saved)
+            await self._notify_owner(
+                request,
+                f"✅ Done: {saved} item(s) from your link are in your Saved Messages.",
+            )
         except Exception as exc:
             log.warning(
                 "link_request_failed",
@@ -321,12 +307,10 @@ class LinkRequestProcessor:
             await _set_status(LinkRequestStatus.FAILED, error=str(exc)[:2000])
             await self._notify_owner(request, f"❌ Link failed: {exc}")
 
-    async def _save_ref(self, client, request, ref: PostRef, settings) -> tuple[int, int]:
-        """Save every post in the ref; returns (newly_saved, duplicates)."""
+    async def _save_ref(self, client, request, ref: PostRef, settings) -> int:
         service = RestrictedContentService(client, account_id=request.telegram_account_id)
         ids = ref.message_ids[: settings.restricted_max_batch]
         saved = 0
-        duplicates = 0
         for index, msg_id in enumerate(ids):
             single = PostRef(
                 peer=ref.peer, message_ids=(msg_id,),
@@ -343,13 +327,11 @@ class LinkRequestProcessor:
                 force=True,
                 capture_only_timed=False,
             )
-            if outcome == "saved":
+            if outcome in ("saved", "duplicate"):
                 saved += 1
-            elif outcome == "duplicate":
-                duplicates += 1
             if index < len(ids) - 1 and settings.restricted_batch_delay_seconds > 0:
                 await asyncio.sleep(settings.restricted_batch_delay_seconds)
-        return saved, duplicates
+        return saved
 
     async def _notify_owner(self, request, text: str) -> None:
         """Best-effort Bot API notice to the requesting user.
