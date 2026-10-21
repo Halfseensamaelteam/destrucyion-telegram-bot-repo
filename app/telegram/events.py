@@ -10,11 +10,20 @@ Each account gets its own set of event handlers, bound to that account's
 context. Handlers are isolated — a crash in one account's handler
 does not affect other accounts.
 
-Two capture modes (mirroring the original Saveit.py):
+Three capture modes (mirroring the original Saveit.py, plus link fetch):
   - AUTOMATIC: every INCOMING message is inspected. By default only
-    timed/self-destructing media is saved (settings.capture_only_timed).
+    timed/self-destructing media is saved (settings.capture_only_timed) —
+    plus, when settings.capture_protected_content is on, media from chats
+    with "Restrict saving content" enabled (noforwards), which likewise
+    can never be retrieved by forwarding afterwards.
   - MANUAL: the account owner replies to any media message with the trigger
     text (settings.save_trigger, default ".saveit") to save it on demand.
+  - LINK: the account owner sends "<restricted_trigger> <t.me link>"
+    (default ".get ...") in their own Saved Messages. The worker fetches
+    that post — private/restricted channels included, invite links join
+    first — on this account's own client and saves a copy here. Bot-chat
+    submissions (/save) take the same path via LinkRequest rows drained
+    by app.services.restricted.LinkRequestProcessor.
 
 Important filters (regressions if removed):
   - Automatic mode uses events.NewMessage(incoming=True). Without it the
@@ -76,6 +85,7 @@ def make_handler_factory(
         settings = get_settings()
         only_timed = settings.capture_only_timed
         trigger = (settings.save_trigger or "").strip()
+        restricted_trigger = (settings.restricted_trigger or "").strip()
 
         async def on_incoming_message(event: events.NewMessage.Event) -> None:
             """AUTOMATIC mode: fired for every message this account RECEIVES."""
@@ -87,6 +97,7 @@ def make_handler_factory(
                     session_factory=session_factory,
                     force=False,
                     capture_only_timed=only_timed,
+                    capture_protected_content=settings.capture_protected_content,
                 )
             except Exception as exc:
                 log.error(
@@ -111,6 +122,27 @@ def make_handler_factory(
                     error=str(exc),
                 )
 
+        async def on_restricted_link(event: events.NewMessage.Event) -> None:
+            """LINK mode: owner sends '<restricted_trigger> <t.me link>'.
+
+            Restricted to the owner's own Saved Messages chat — the same
+            place saved copies land — so the command can never leak into
+            (or be triggered from) a conversation with someone else.
+            """
+            try:
+                await _handle_restricted_link(
+                    event=event,
+                    account_id=account_id,
+                    manager=manager,
+                    session_factory=session_factory,
+                )
+            except Exception as exc:
+                log.error(
+                    "restricted_link_unhandled_error",
+                    account_id=account_id,
+                    error=str(exc),
+                )
+
         handlers = [
             # incoming=True is REQUIRED — see module docstring.
             (on_incoming_message, events.NewMessage(incoming=True)),
@@ -120,6 +152,16 @@ def make_handler_factory(
                 (
                     on_manual_save,
                     events.NewMessage(outgoing=True, pattern=rf"^{re.escape(trigger)}$"),
+                )
+            )
+        if restricted_trigger:
+            handlers.append(
+                (
+                    on_restricted_link,
+                    events.NewMessage(
+                        outgoing=True,
+                        pattern=rf"(?i)^{re.escape(restricted_trigger)}\s+\S+",
+                    ),
                 )
             )
         return handlers
@@ -188,6 +230,148 @@ async def _handle_manual_save(
         await _notify_owner(client, "ℹ️ That media was already saved.")
 
 
+async def _handle_restricted_link(
+    *,
+    event: events.NewMessage.Event,
+    account_id: int,
+    manager,
+    session_factory: Callable[[], AsyncSession],
+) -> None:
+    """Fetch a post by t.me link (private/restricted included) for the owner.
+
+    The owner sends ``.get https://t.me/c/<id>/<msg>`` (or a range, or an
+    invite link) in their own Saved Messages. Everything runs on THIS
+    account's client — the account must already be a member of a private
+    chat; invite links join first. Copies land back in Saved Messages via
+    the normal _process_message pipeline (DB idempotency included), so a
+    post that was already captured is reported as a duplicate, not re-saved.
+    """
+    import asyncio
+
+    from app.services.restricted import (
+        RestrictedContentError,
+        RestrictedContentService,
+        copy_text_to_saved,
+        join_by_invite,
+    )
+    from app.telegram.link_parser import InviteRef, parse_link
+
+    settings = get_settings()
+    client = manager.get_client(account_id)
+    if client is None:
+        return
+
+    # Only honour the command inside the owner's Saved Messages chat.
+    # event.chat_id for Saved Messages is the owner's own user id.
+    try:
+        me = await client.get_me()
+        if me is None or event.chat_id != me.id:
+            return
+    except Exception:
+        return
+
+    raw_text = (event.raw_text or "").strip()
+    # The trigger is a command, not conversation — remove it (best effort),
+    # the same way .saveit removes itself.
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+    # Everything after the trigger word is the link (link may be the whole rest).
+    link_text = raw_text.split(maxsplit=1)[1] if len(raw_text.split(maxsplit=1)) > 1 else ""
+    parsed = parse_link(link_text)
+    if parsed is None:
+        await _notify_owner(
+            client,
+            "⚠️ That does not look like a Telegram post/invite link.\n"
+            "Examples:\n"
+            "• .get https://t.me/channel/123\n"
+            "• .get https://t.me/c/1234567/100-110\n"
+            "• .get https://t.me/+AbCdEfGh (join first, then send the post link)",
+        )
+        return
+
+    if isinstance(parsed, InviteRef):
+        try:
+            result = await join_by_invite(client, parsed.invite_hash)
+            await _notify_owner(
+                client,
+                f"✅ Invite handled ({result}). Now send the post link with "
+                f"{settings.restricted_trigger} and it will be saved here.",
+            )
+        except RestrictedContentError as exc:
+            await _notify_owner(client, f"❌ {exc}")
+        return
+
+    service = RestrictedContentService(client, account_id=account_id)
+    ids = parsed.message_ids[: settings.restricted_max_batch]
+    if len(parsed.message_ids) > len(ids):
+        await _notify_owner(
+            client,
+            f"⚠️ Range capped at {settings.restricted_max_batch} posts "
+            f"(you asked for {len(parsed.message_ids)}).",
+        )
+
+    saved = duplicate = failed = 0
+    for index, msg_id in enumerate(ids):
+        from app.telegram.link_parser import PostRef
+
+        single = PostRef(
+            peer=parsed.peer,
+            message_ids=(msg_id,),
+            is_private=parsed.is_private,
+            topic_id=parsed.topic_id,
+        )
+        try:
+            (message,) = await service.fetch_messages(single)
+        except RestrictedContentError as exc:
+            await _notify_owner(client, f"❌ {exc}")
+            return
+        if message is None:
+            failed += 1
+            continue
+        if classify_message(message) is None:
+            # Text-only post: protected text cannot be forwarded either —
+            # re-send it as a new Saved Messages note.
+            text = getattr(message, "text", None) or getattr(message, "message", None)
+            if text:
+                try:
+                    await copy_text_to_saved(
+                        client, message, header="📥 Text post saved via link"
+                    )
+                    saved += 1
+                except Exception:
+                    failed += 1
+            else:
+                failed += 1
+            continue
+        outcome = await _process_message(
+            message=message,
+            account_id=account_id,
+            manager=manager,
+            session_factory=session_factory,
+            force=True,
+            capture_only_timed=False,
+        )
+        if outcome == "saved":
+            saved += 1
+        elif outcome == "duplicate":
+            duplicate += 1
+        else:
+            failed += 1
+        if index < len(ids) - 1 and settings.restricted_batch_delay_seconds > 0:
+            await asyncio.sleep(settings.restricted_batch_delay_seconds)
+
+    summary = f"✅ Link done: {saved} saved"
+    if duplicate:
+        summary += f", {duplicate} already saved"
+    if failed:
+        summary += f", {failed} not found/failed"
+    summary += "."
+    await _notify_owner(client, summary)
+
+
 async def _process_message(
     *,
     message: Message,
@@ -196,13 +380,17 @@ async def _process_message(
     session_factory: Callable[[], AsyncSession],
     force: bool,
     capture_only_timed: bool,
+    capture_protected_content: bool = True,
 ) -> str:
     """Capture + save a single message for a given account.
 
     Args:
         force: True for manual saves — bypasses the timed-only filter and
             retries a previously FAILED record.
-        capture_only_timed: If True, non-timed media is ignored.
+        capture_only_timed: If True, non-timed media is ignored — EXCEPT
+            protected (noforwards) media when capture_protected_content
+            is on: a protected post can never be fetched by forwarding
+            later, so arrival is the only reliable chance to save it.
 
     Returns one of: "ignored", "saved", "duplicate", "failed".
     """
@@ -212,7 +400,12 @@ async def _process_message(
         return "ignored"
 
     # Automatic mode saves only timed media unless configured otherwise.
-    if capture_only_timed and not force and not media_info.is_self_destruct:
+    if (
+        capture_only_timed
+        and not force
+        and not media_info.is_self_destruct
+        and not (capture_protected_content and media_info.is_protected)
+    ):
         return "ignored"
 
     # Step 3: get user_id from manager's registry

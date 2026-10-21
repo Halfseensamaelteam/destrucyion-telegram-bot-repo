@@ -37,6 +37,7 @@ from app.bot.handlers.subscription_payment import subscription_payment_callback
 from app.bot.handlers.admin import admin_command
 from app.bot.handlers.phone_login import connect_phone_command
 from app.bot.handlers.channel_gate import channel_membership_gate, check_channel_membership
+from app.bot.handlers.restricted import save_link_command, save_link_message
 
 
 def create_bot_app() -> Application:
@@ -77,6 +78,17 @@ def create_bot_app() -> Application:
             subscription_payment_callback,
             pattern="^(subscription_qris_menu$|subscription_payment_link_menu$|subscription_link_plan_|subscription_buy_|subscription_add_plan$|subscription_bank_|subscription_indonesia_pay:|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_|nowpayments_asset_|nowpayments_target_|np:)",
         )
+    )
+
+    # Restricted-content link saving (/save + bare t.me links).
+    # The bot only queues a LinkRequest row — the worker fetches it with
+    # the user's own Telethon client. The plain-link handler sits in
+    # group 1 so the /connect ConversationHandler (group 0) always gets
+    # first refusal on text input; it also no-ops on non-link text.
+    application.add_handler(CommandHandler("save", save_link_command))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, save_link_message),
+        group=1,
     )
 
     # Admin

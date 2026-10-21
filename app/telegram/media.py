@@ -45,6 +45,10 @@ class MediaInfo:
     ttl_seconds: int | None
     is_self_destruct: bool
     caption: str | None
+    # True when the source chat forbids forwarding ("Restrict saving
+    # content" — Telethon exposes it as Message.noforwards). Such media
+    # can only be saved by download + re-upload, never by forwarding.
+    is_protected: bool = False
 
 
 def classify_message(message: Message) -> MediaInfo | None:
@@ -81,6 +85,7 @@ def classify_message(message: Message) -> MediaInfo | None:
             ttl_seconds=ttl,
             is_self_destruct=ttl is not None,
             caption=getattr(message, "message", None) or None,
+            is_protected=getattr(message, "noforwards", False) is True,
         )
 
     # --- Document-based media ---
@@ -100,6 +105,7 @@ def classify_message(message: Message) -> MediaInfo | None:
             ttl_seconds=ttl,
             is_self_destruct=ttl is not None,
             caption=caption,
+            is_protected=getattr(message, "noforwards", False) is True,
         )
 
     return None

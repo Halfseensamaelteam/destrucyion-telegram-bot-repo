@@ -23,6 +23,10 @@ class TelegramNotifier:
 
         self._bot = Bot(token=token)
 
+    async def send_text(self, *, telegram_user_id: int, text: str) -> None:
+        """Send a plain transactional text message to a user."""
+        await self._bot.send_message(chat_id=telegram_user_id, text=text)
+
     async def send_subscription_activated(
         self,
         *,
