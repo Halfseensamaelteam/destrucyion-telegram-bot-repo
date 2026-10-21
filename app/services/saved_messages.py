@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.core.logging import get_logger
-from app.telegram.metadata import ChatInfo, SenderInfo, build_caption
+from app.telegram.metadata import ChatInfo, SenderInfo
 
 log = get_logger(__name__)
 
@@ -243,15 +243,14 @@ class SavedMessagesService:
         Raises:
             SavedMessagesForwardError: When all forwarding strategies fail.
         """
-        from datetime import datetime, timezone
-
-        caption = build_caption(
-            sender=sender_info,
-            chat=chat_info,
-            media_type=record.media_type.value,
-            ttl_seconds=record.ttl_seconds,
-            captured_at=datetime.now(timezone.utc),
-        )
+        # Caption policy (owner's decision, same as the reference bot):
+        # the copy carries ONLY the post's own caption/description,
+        # exactly as written — no sender/chat/timestamp metadata block.
+        # A source without a caption produces a copy without one.
+        # (sender_info/chat_info stay in the signature for callers and
+        # for the recovery-note path, which builds its own text.)
+        raw_text = getattr(source_message, "message", None)
+        caption = raw_text.strip() if isinstance(raw_text, str) else ""
 
         # Timed / self-destructing media: NEVER forward and NEVER re-send by
         # file reference. Telegram refuses to forward it, and Telethon's
@@ -347,12 +346,16 @@ class SavedMessagesService:
         fwd_msg = forwarded[0] if isinstance(forwarded, list) else forwarded
         saved_id = fwd_msg.id
 
-        # Send caption as a follow-up text reply pinned to the forwarded message
-        await self._client.send_message(
-            entity=InputPeerSelf(),
-            message=caption,
-            reply_to=saved_id,
-        )
+        # Send the original caption as a follow-up text reply pinned to
+        # the forwarded message — only when the source actually had one
+        # (Telegram rejects empty messages, and a caption-less post
+        # should stay caption-less, like the reference bot's copies).
+        if caption:
+            await self._client.send_message(
+                entity=InputPeerSelf(),
+                message=caption,
+                reply_to=saved_id,
+            )
 
         return ForwardResult(
             saved_message_id=saved_id,

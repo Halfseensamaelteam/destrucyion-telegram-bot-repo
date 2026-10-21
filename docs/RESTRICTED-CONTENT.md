@@ -26,7 +26,8 @@ Content) use — adapted here to this project's multi-tenant architecture:
 | Telegram access | One shared string session, or a Pyrogram login per user stored in MongoDB | The user's **own** Telethon account, already connected via `/connect` (encrypted session, per-account api_id/api_hash) |
 | Delivery | Bot API `send_photo/send_video` back to the chat — Bot API upload limit applies (~50 MB) | MTProto upload by the user's own client into their **Saved Messages** — no Bot API upload limit |
 | Where a link is processed | Inside the bot process (bot + userbot in one process) | Bot writes a `LinkRequest` row → worker drains it (`PostgreSQL is authoritative`, AGENTS.md rule 6) |
-| Duplicates | None / in-memory flags | DB UNIQUE key `(account, chat, message)` — re-requesting a post reports "already saved" |
+| Duplicates | None / in-memory flags | Automatic capture dedupes via the DB UNIQUE key `(account, chat, message)`; an explicit link request always delivers a fresh copy (owner's choice — no check stands in the way) |
+| Captions | Original caption only | Original caption only — the copy carries the post's own description verbatim, no sender/chat/timestamp metadata block |
 | Extra modes | Link only | Link + automatic capture of protected posts on arrival + reply `.saveit` (existing) |
 
 ## Three ways to use it

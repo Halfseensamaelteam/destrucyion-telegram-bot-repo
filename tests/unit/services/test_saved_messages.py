@@ -128,23 +128,25 @@ async def test_forward_success():
 
 
 async def test_forward_calls_send_message_for_caption():
-    """After forwarding, a caption reply is sent."""
+    """After forwarding, the ORIGINAL caption is sent as a caption reply."""
     client = make_client(forward_result_id=2222)
     svc = SavedMessagesService(client, account_id=1)
 
+    msg = make_message()
+    msg.message = "halo dunia"
     await svc.forward(
-        make_message(),
+        msg,
         sender_info=make_sender(username="bob"),
         chat_info=make_chat(title="Group"),
         record=make_record(account_id=1),
     )
 
-    # Caption send_message should have been called with reply_to=forwarded_id
+    # The follow-up carries the source's own caption verbatim — no
+    # sender/chat/timestamp metadata block (owner's caption policy).
     client.send_message.assert_called_once()
     call_kwargs = client.send_message.call_args.kwargs
     assert call_kwargs["reply_to"] == 2222
-    assert "@bob" in call_kwargs["message"]
-    assert "Group" in call_kwargs["message"]
+    assert call_kwargs["message"] == "halo dunia"
 
 
 # ---------------------------------------------------------------------------
@@ -269,8 +271,9 @@ async def test_two_accounts_never_share_client():
 # Tests: Caption content
 # ---------------------------------------------------------------------------
 
-async def test_caption_includes_timed_marker_for_timed_media():
-    """For self-destructing media, caption includes the TTL marker."""
+async def test_timed_media_copy_carries_only_the_original_caption():
+    """Timed media is re-uploaded with the source's own caption only —
+    no TTL marker, no Sender ID / timestamp metadata block."""
     client = make_client()
     svc = SavedMessagesService(client, account_id=1)
 
@@ -278,8 +281,10 @@ async def test_caption_includes_timed_marker_for_timed_media():
     record.ttl_seconds = 10
     record.media_type = MediaType.VIDEO
 
+    msg = make_message()
+    msg.message = "deskripsi aslinya"
     await svc.forward(
-        make_message(),
+        msg,
         sender_info=make_sender(username="dave"),
         chat_info=make_chat(),
         record=record,
@@ -288,12 +293,12 @@ async def test_caption_includes_timed_marker_for_timed_media():
     # Timed media is downloaded and re-uploaded, so the caption travels with
     # send_file (not as a follow-up send_message like the forward path).
     caption_arg = client.send_file.call_args.kwargs["caption"]
-    assert "Self-destructing" in caption_arg
-    assert "10s" in caption_arg
+    assert caption_arg == "deskripsi aslinya"
 
 
-async def test_caption_does_not_include_timed_marker_for_normal_media():
-    """For normal media (no TTL), caption has no TTL marker."""
+async def test_captionless_media_gets_no_caption_followup():
+    """A source with no caption produces a copy with no caption at all:
+    no follow-up message is sent on the forward path."""
     client = make_client()
     svc = SavedMessagesService(client, account_id=1)
 
@@ -301,16 +306,16 @@ async def test_caption_does_not_include_timed_marker_for_normal_media():
     record.ttl_seconds = None
     record.media_type = MediaType.PHOTO
 
+    msg = make_message()
+    msg.message = ""
     await svc.forward(
-        make_message(),
+        msg,
         sender_info=make_sender(),
         chat_info=make_chat(),
         record=record,
     )
 
-    caption_arg = client.send_message.call_args.kwargs["message"]
-    assert "Self-destructing" not in caption_arg
-    assert "⏱" not in caption_arg
+    client.send_message.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
