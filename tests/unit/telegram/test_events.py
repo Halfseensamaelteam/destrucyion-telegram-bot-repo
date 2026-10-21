@@ -70,7 +70,8 @@ async def test_factory_registers_owner_only_manual_trigger(monkeypatch):
         factory = ev.make_handler_factory(make_session_factory())
         handlers = factory(make_manager(), 1)
 
-        assert len(handlers) == 2
+        # auto + manual (.saveit) + link (.get) handlers
+        assert len(handlers) == 3
 
         _, manual_builder = handlers[1]
         assert manual_builder.outgoing is True
@@ -84,12 +85,30 @@ async def test_factory_registers_owner_only_manual_trigger(monkeypatch):
 
 async def test_trigger_can_be_disabled_with_empty_setting(monkeypatch):
     monkeypatch.setenv("SAVE_TRIGGER", "")
+    monkeypatch.setenv("RESTRICTED_TRIGGER", "")
     from app.core.config import get_settings
 
     get_settings.cache_clear()
     try:
         handlers = ev.make_handler_factory(make_session_factory())(make_manager(), 1)
         assert len(handlers) == 1
+    finally:
+        get_settings.cache_clear()
+
+
+async def test_factory_registers_restricted_link_trigger(monkeypatch):
+    monkeypatch.setenv("RESTRICTED_TRIGGER", ".get")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    try:
+        handlers = ev.make_handler_factory(make_session_factory())(make_manager(), 1)
+        _, link_builder = handlers[2]
+        assert link_builder.outgoing is True
+        assert link_builder.pattern is not None
+        assert link_builder.pattern(".get https://t.me/c/123/45")
+        assert not link_builder.pattern(".get")
+        assert not link_builder.pattern("please .get https://t.me/c/123/45")
     finally:
         get_settings.cache_clear()
 
@@ -134,6 +153,55 @@ async def test_non_timed_media_captured_when_setting_disabled():
             capture_only_timed=False,
         )
     assert outcome == "saved"
+
+
+def protected_info():
+    return MediaInfo(
+        media_type=MediaType.VIDEO, ttl_seconds=None, is_self_destruct=False,
+        caption=None, is_protected=True,
+    )
+
+
+async def test_protected_media_is_saved_even_in_timed_only_mode():
+    """Restrict-saving-content posts can never be forwarded later, so —
+    like timed media — arrival is the only chance to save them."""
+    record = MagicMock(id=5, ttl_seconds=None, media_type=MediaType.VIDEO)
+    cap_instance = MagicMock()
+    cap_instance.record = AsyncMock(return_value=(record, True))
+    cap_instance.mark_saved = AsyncMock()
+    fwd_instance = MagicMock()
+    fwd_instance.forward = AsyncMock(return_value=MagicMock(saved_message_id=99, was_resent=True))
+
+    with patch.object(ev, "classify_message", return_value=protected_info()), \
+         patch.object(ev, "_build_context", AsyncMock(return_value=(MagicMock(), MagicMock(), MagicMock()))), \
+         patch.object(ev, "MediaCaptureService", return_value=cap_instance), \
+         patch.object(ev, "SavedMessagesService", return_value=fwd_instance):
+        outcome = await ev._process_message(
+            message=MagicMock(),
+            account_id=1,
+            manager=make_manager(client=MagicMock()),
+            session_factory=make_session_factory(),
+            force=False,
+            capture_only_timed=True,
+            capture_protected_content=True,
+        )
+    assert outcome == "saved"
+
+
+async def test_protected_media_ignored_when_protected_capture_disabled():
+    with patch.object(ev, "classify_message", return_value=protected_info()), \
+         patch.object(ev, "MediaCaptureService") as cap:
+        outcome = await ev._process_message(
+            message=MagicMock(),
+            account_id=1,
+            manager=make_manager(),
+            session_factory=make_session_factory(),
+            force=False,
+            capture_only_timed=True,
+            capture_protected_content=False,
+        )
+    assert outcome == "ignored"
+    cap.assert_not_called()
 
 
 async def test_timed_media_is_saved_in_automatic_mode():

@@ -63,12 +63,31 @@ async def run() -> None:
     recovery = RecoveryService(session_factory, manager)
     recovery_summary = await recovery.run()
     log.info("worker_recovery_done", **recovery_summary)
-    
+
+    # Restricted-content link queue: the bot writes LinkRequest rows for
+    # /save submissions; this loop drains them with each owner's own
+    # Telethon client (the only place clients exist). _process_message is
+    # injected to keep the record+forward pipeline single-sourced.
+    from app.services.restricted import LinkRequestProcessor
+    from app.telegram.events import _process_message
+
+    link_processor = LinkRequestProcessor(
+        session_factory, manager, process_message=_process_message
+    )
+    link_task = asyncio.create_task(
+        link_processor.run_forever(), name="link-request-processor"
+    )
+
     try:
         await manager.run_forever()
     except asyncio.CancelledError:
         pass
     finally:
+        link_task.cancel()
+        try:
+            await link_task
+        except asyncio.CancelledError:
+            pass
         await manager.stop()
         log.info("worker_stopped")
 

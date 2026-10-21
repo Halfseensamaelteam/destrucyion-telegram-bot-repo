@@ -12,6 +12,7 @@ from app.db.models.telegram_account import TelegramAccount, TelegramAccountStatu
 from app.db.models.user import User
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.nowpayments_payment import NOWPaymentsPayment
+from app.db.models.link_request import LinkRequest, LinkRequestStatus
 
 __all__ = [
     "Base",
@@ -27,4 +28,6 @@ __all__ = [
     "AuditLog",
     "AuditAction",
     "NOWPaymentsPayment",
+    "LinkRequest",
+    "LinkRequestStatus",
 ]

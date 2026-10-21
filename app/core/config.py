@@ -109,6 +109,41 @@ class Settings(BaseSettings):
             "regardless of capture_only_timed."
         ),
     )
+    capture_protected_content: bool = Field(
+        default=True,
+        description=(
+            "If true (default), incoming media from chats with 'Restrict "
+            "saving content' on (Message.noforwards) is automatically "
+            "saved even when capture_only_timed is true — protected posts "
+            "are, like timed media, impossible to retrieve later by "
+            "forwarding, so download+upload at arrival is the only chance."
+        ),
+    )
+    restricted_trigger: str = Field(
+        default=".get",
+        description=(
+            "Link-save command for the account owner. The owner sends "
+            "'<trigger> <t.me link>' in their own Saved Messages and the "
+            "worker fetches that post (private/restricted included) with "
+            "their own client and saves a copy to Saved Messages. Ranges "
+            "('<trigger> https://t.me/c/123/100-110') are supported. "
+            "Leave empty to disable the link trigger entirely."
+        ),
+    )
+    restricted_max_batch: int = Field(
+        default=20,
+        description=(
+            "Maximum number of posts one link/range request will fetch. "
+            "Caps FloodWait/ban risk from absurd ranges."
+        ),
+    )
+    restricted_batch_delay_seconds: float = Field(
+        default=2.0,
+        description=(
+            "Pause between posts in one range request. FloodWait errors "
+            "are additionally retried by SavedMessagesService."
+        ),
+    )
     display_timezone: str = Field(
         default="UTC",
         description=(

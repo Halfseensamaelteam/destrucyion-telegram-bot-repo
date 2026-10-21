@@ -148,7 +148,15 @@ class SavedMessagesService:
         # rejected outright in Saved Messages). The only reliable way — and
         # what the original Saveit.py does — is to download the bytes and
         # upload them as a brand-new, non-timed file.
-        if record.ttl_seconds is not None:
+        #
+        # Protected media (chat has "Restrict saving content" on, exposed
+        # as Message.noforwards) is in the same class: Telegram refuses to
+        # forward it at all (ChatForwardsRestrictedError), for Bot API and
+        # MTProto alike — but a member account can still download the bytes.
+        # Going straight to download+upload also saves one doomed RPC (and
+        # its FloodWait risk) per protected post.
+        is_protected = getattr(source_message, "noforwards", False) is True
+        if record.ttl_seconds is not None or is_protected:
             try:
                 result = await self._try_resend(source_message, caption)
                 log.info(
@@ -167,7 +175,7 @@ class SavedMessagesService:
                     error=str(exc),
                 )
                 raise SavedMessagesForwardError(
-                    f"Could not download and re-upload timed media: {exc}"
+                    f"Could not download and re-upload timed/protected media: {exc}"
                 ) from exc
 
         # Strategy 1: forward (zero re-upload) — normal, non-timed media only
