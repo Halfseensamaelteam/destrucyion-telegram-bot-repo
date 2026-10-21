@@ -551,8 +551,11 @@ async def run(args: argparse.Namespace) -> int:
     db_counts: dict[str, int] = {"pending": total_requests, "processing": 0}
     stop = asyncio.Event()
     started = time.monotonic()
-    live = (not args.no_live) and sys.stdout.isatty()
+    live = args.live or ((not args.no_live) and sys.stdout.isatty())
     if live:
+        print("DASHBOARD LIVE aktif — tampilan diperbarui tiap 0.5 detik "
+              "selama test berjalan. Ctrl+C berhenti dengan aman dan "
+              "laporan akhir tetap dicetak.", flush=True)
         # The pipeline's INFO logs would shred the dashboard; keep WARNING+.
         import logging
 
@@ -600,6 +603,29 @@ async def run(args: argparse.Namespace) -> int:
             await asyncio.sleep(2)
 
     counts_task = asyncio.create_task(_counts_loop())
+
+    # Ctrl+C (SIGINT) or a container stop (SIGTERM) must end the run
+    # gracefully WITH the final report — not kill the process silently.
+    # The handler cancels the drain; the CancelledError is caught below
+    # and execution falls through to the report with partial results.
+    interrupted = False
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+
+    def _request_stop() -> None:
+        nonlocal interrupted
+        interrupted = True
+        if main_task is not None:
+            main_task.cancel()
+
+    import signal as _signal
+
+    for _sig in (_signal.SIGINT, _signal.SIGTERM):
+        try:
+            loop.add_signal_handler(_sig, _request_stop)
+        except (NotImplementedError, RuntimeError):
+            pass
+
     deadline = started + args.timeout
     try:
         while time.monotonic() < deadline:
@@ -610,10 +636,18 @@ async def run(args: argparse.Namespace) -> int:
                 break
             if claimed == 0:
                 await asyncio.sleep(0.25)
+    except asyncio.CancelledError:
+        if not interrupted:
+            raise
     finally:
         stop.set()
         await dash
         counts_task.cancel()
+        for _sig in (_signal.SIGINT, _signal.SIGTERM):
+            try:
+                loop.remove_signal_handler(_sig)
+            except (NotImplementedError, RuntimeError):
+                pass
     wall = time.monotonic() - started
 
     # ---- final report ---------------------------------------------------
@@ -626,6 +660,8 @@ async def run(args: argparse.Namespace) -> int:
     done = [r for r in rows if r.status == LinkRequestStatus.DONE]
     done_empty = [r for r in done if not r.result_count]
     failed = [r for r in rows if r.status == LinkRequestStatus.FAILED]
+    unfinished = [r for r in rows if r.status in (
+        LinkRequestStatus.PENDING, LinkRequestStatus.PROCESSING)]
     latencies = sorted(
         (r.processed_at - r.created_at).total_seconds()
         for r in done
@@ -638,8 +674,11 @@ async def run(args: argparse.Namespace) -> int:
         return latencies[min(len(latencies) - 1, int(len(latencies) * p))]
 
     print("\n================ LOAD TEST RESULT ================")
+    if interrupted:
+        print("!! Dihentikan manual (Ctrl+C) — hasil parsial di bawah ini.")
     print(f"requests:        {total_requests}  done={len(done)} "
-          f"(empty={len(done_empty)})  failed={len(failed)}")
+          f"(empty={len(done_empty)})  failed={len(failed)}  "
+          f"unfinished={len(unfinished)}")
     print(f"wall time:       {wall:.1f}s  ({total_requests / max(wall, 0.001):.2f} req/s)")
     print(f"max download streams active at once: {stats.max_streams}")
     print(f"max uploads active at once:          {stats.max_uploads}")
@@ -652,6 +691,9 @@ async def run(args: argparse.Namespace) -> int:
         print("first failure:", failed[0].error)
     ok = (len(done) == total_requests and not done_empty
           and stats.uploads == total_requests)
+    if interrupted:
+        print("verdict: PARTIAL — stopped early by the user")
+        return 130
     print("verdict:", "PASS — every request saved exactly once" if ok else "FAIL")
     return 0 if ok else 1
 
@@ -673,6 +715,9 @@ def main() -> None:
                         help="random seed — same seed, same workload plan")
     parser.add_argument("--no-live", action="store_true",
                         help="plain periodic summaries instead of the live dashboard")
+    parser.add_argument("--live", action="store_true",
+                        help="force the live dashboard even when stdout is "
+                             "not a TTY (e.g. watching via docker logs -f)")
     parser.add_argument("--database-url", default="sqlite+aiosqlite:///./loadtest.db")
     parser.add_argument("--timeout", type=float, default=3600)
     parser.add_argument("--confirm-scratch-db", action="store_true",
