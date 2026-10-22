@@ -112,14 +112,21 @@ because only claims older than the threshold are touched).
 A fixed slot count is a blunt instrument: it cannot tell small files
 from huge ones. Setting `LINK_REQUEST_MEMORY_BUDGET_MB` (e.g. `3072` on
 an 8 GB VPS) together with a high `LINK_REQUEST_MAX_CONCURRENCY`
-ceiling switches the processor to adaptive mode — before each batch it
-measures its own RAM (RSS, `app/core/resources.py`) and adjusts the
-claim size AIMD-style: over budget the batch halves, under 80% of
-budget it grows by a quarter, so parallelism self-tunes to the memory
-the box actually has (the budget covers the whole worker process,
-connected clients included). Default `0` keeps the fixed-cap behaviour.
-Note the budget guards RAM only: temp-disk headroom still scales with
-concurrency × largest file, so size the ceiling with that in mind.
+ceiling switches the processor to adaptive mode. The processor runs a
+continuous admission supervisor: slots refill the moment a transfer
+finishes, and every tick (≤ the poll interval, and instantly on any
+completion) it measures its own RAM (RSS, `app/core/resources.py`) and
+adjusts the admission limit AIMD-style — the limit starts AT the cap,
+halves within one tick when RAM goes over budget, and regrows by a
+quarter per tick when comfortably under 80%. The budget is a brake,
+not a ramp: a workload that never threatens RAM runs at exactly
+fixed-cap speed (an earlier batch-based design re-evaluated only
+between batches and measured 75% slower than the fixed cap on a
+600-file run — a batch lives as long as its slowest transfer). The
+budget covers the whole worker process, connected clients included.
+Default `0` keeps the fixed-cap behaviour. Note the budget guards RAM
+only: temp-disk headroom still scales with concurrency × largest file,
+so size the ceiling with that in mind.
 
 Setting `LINK_REQUEST_MAX_CONCURRENCY=0` **together with** a budget
 selects budget-only mode: no human-set slot cap at all — the AIMD

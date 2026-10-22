@@ -282,18 +282,22 @@ def _budget_processor(db_session, *, cap, budget_mb, rss):
 async def test_adaptive_limit_shrinks_when_over_budget(db_session):
     """AIMD: over the RAM budget, the claim batch halves down to 1."""
     processor = _budget_processor(db_session, cap=50, budget_mb=100, rss=5000.0)
-    assert processor._effective_claim_limit() == 5   # 10 -> 5
-    assert processor._effective_claim_limit() == 2   # 5 -> 2
-    assert processor._effective_claim_limit() == 1   # 2 -> 1
+    assert processor._effective_claim_limit() == 25  # 50 -> 25
+    assert processor._effective_claim_limit() == 12  # 25 -> 12
+    assert processor._effective_claim_limit() == 6   # 12 -> 6
+    assert processor._effective_claim_limit() == 3   # 6 -> 3
+    assert processor._effective_claim_limit() == 1   # 3 -> 1
     assert processor._effective_claim_limit() == 1   # floor
 
 
 async def test_adaptive_limit_grows_when_under_budget(db_session):
-    """Under 80% of budget the batch grows by a quarter, capped."""
-    processor = _budget_processor(db_session, cap=50, budget_mb=100, rss=10.0)
+    """After a shrink, under 80% of budget the limit regrows, capped."""
+    processor = _budget_processor(db_session, cap=50, budget_mb=100, rss=5000.0)
+    assert processor._effective_claim_limit() == 25  # braked first
+    processor._rss_reader = lambda: 10.0  # RAM pressure gone
     first = processor._effective_claim_limit()
     second = processor._effective_claim_limit()
-    assert second > first >= 10
+    assert second > first >= 25
     for _ in range(30):
         limit = processor._effective_claim_limit()
     assert limit == 50  # never beyond the hard cap
@@ -306,7 +310,7 @@ async def test_fixed_mode_ignores_rss(db_session):
 
 
 async def test_adaptive_claim_processes_only_the_shrunken_batch(db_session, user, account):
-    """End-to-end in miniature: over budget, one pass claims 5 of 8."""
+    """End-to-end in miniature: over budget, one pass claims 25 of 40."""
     from app.db.models.link_request import LinkRequestStatus
     from app.db.repositories.link_request_repo import LinkRequestRepository
     from app.services.restricted import RestrictedContentService
@@ -322,7 +326,7 @@ async def test_adaptive_claim_processes_only_the_shrunken_batch(db_session, user
     processor._rss_reader = lambda: 5000.0  # way over budget
     processor._notify_owner = AsyncMock()
     repo = LinkRequestRepository(db_session)
-    for i in range(8):
+    for i in range(40):
         await repo.create(user_id=user.id, telegram_account_id=account.id,
                           raw_link=f"https://t.me/chan/{i + 1}")
     await db_session.commit()
@@ -332,9 +336,9 @@ async def test_adaptive_claim_processes_only_the_shrunken_batch(db_session, user
                    AsyncMock(return_value=[MagicMock(id=42)]))
         processed = await processor.process_pending_once()
 
-    assert processed == 5
+    assert processed == 25
     remaining = await repo.list_pending(limit=50)
-    assert len(remaining) == 3
+    assert len(remaining) == 15
     assert all(r.status == LinkRequestStatus.PENDING for r in remaining)
 
 
@@ -351,11 +355,12 @@ def _budget_only_processor(db_session, *, rss, free_mb):
 
 async def test_budget_only_removes_the_slot_cap(db_session):
     """Cap 0 + budget: no human ceiling; RAM sizes the batch."""
-    processor = _budget_only_processor(db_session, rss=100.0, free_mb=900_000.0)
+    processor = _budget_only_processor(db_session, rss=100.0, free_mb=30_000_000.0)
     assert processor._budget_only is True
     assert processor._max_concurrency == 100_000
-    # RAM comfortably under budget -> batch grows past any old cap.
-    assert processor._effective_claim_limit() == 12  # 10 + 25%
+    # No human cap anywhere: only the (huge) disk guard remains, so
+    # the effective limit is the disk guard's 30 TB // 300 MB.
+    assert processor._effective_claim_limit() == 100_000
 
 
 async def test_budget_only_disk_guard_binds(db_session):
@@ -373,6 +378,51 @@ async def test_zero_cap_without_budget_falls_back_to_default(db_session):
     )
     assert processor._budget_only is False
     assert processor._effective_claim_limit() == 10
+
+
+async def test_run_forever_drains_the_queue_continuously(db_session, user, account):
+    """The supervisor loop itself (not just one-shot passes) drains."""
+    import asyncio as _asyncio
+
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+    from app.services.restricted import RestrictedContentService
+
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    processor = LinkRequestProcessor(
+        factory, manager,
+        process_message=AsyncMock(return_value="saved"),
+        poll_interval=0.05,
+    )
+    processor._notify_owner = AsyncMock()
+    repo = LinkRequestRepository(db_session)
+    rows = []
+    for i in range(6):
+        rows.append(await repo.create(
+            user_id=user.id, telegram_account_id=account.id,
+            raw_link=f"https://t.me/chan/{i + 1}",
+        ))
+    await db_session.commit()
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(RestrictedContentService, "fetch_messages",
+                   AsyncMock(return_value=[MagicMock(id=42)]))
+        task = _asyncio.create_task(processor.run_forever())
+        try:
+            for _ in range(100):
+                await _asyncio.sleep(0.05)
+                statuses = []
+                for r in rows:
+                    fresh = await repo.get_by_id(r.id)
+                    statuses.append(fresh.status)
+                if all(s == LinkRequestStatus.DONE for s in statuses):
+                    break
+            assert all(s == LinkRequestStatus.DONE for s in statuses)
+        finally:
+            task.cancel()
+            await processor.shutdown()
 
 
 async def test_stale_processing_requests_are_reset(db_session, user, account):
