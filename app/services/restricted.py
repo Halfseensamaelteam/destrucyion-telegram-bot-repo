@@ -251,8 +251,21 @@ class LinkRequestProcessor:
         self._rss_reader = process_rss_mb
         self._temp_free_reader = temp_free_mb
         self._last_disk_cap: int | None = None
-        self._dynamic_limit = min(10, self._max_concurrency)
+        # The adaptive limit STARTS at the full cap: the budget is a
+        # brake, not a ramp. The supervisor re-evaluates every tick
+        # (seconds, and instantly on completions), so if RAM actually
+        # approaches the budget the limit is halved within one tick —
+        # while a workload that never threatens RAM runs at exactly
+        # fixed-cap speed from the first second. (An earlier design
+        # started at 10 and grew +25% per BATCH; measured on a 600-file
+        # run that made budget mode 75% slower than the fixed cap,
+        # because a batch lives as long as its slowest transfer.)
+        self._dynamic_limit = self._max_concurrency
         self._last_claim_limit = self._max_concurrency
+        # Live transfer tasks owned by the supervisor loop, by request
+        # id. Admission = claim only while len(_in_flight) < limit.
+        self._in_flight: dict[int, asyncio.Task] = {}
+        self._last_stale_reset = 0.0
 
     def _effective_claim_limit(self) -> int:
         """How many requests to claim in the next batch.
@@ -301,27 +314,70 @@ class LinkRequestProcessor:
         return limit
 
     async def run_forever(self) -> None:
-        """Poll until cancelled (worker shutdown cancels this task)."""
+        """Continuous admission supervisor (until cancelled).
+
+        Slots are refilled the moment a transfer finishes and the
+        effective limit is re-evaluated every tick (at most the poll
+        interval apart, and immediately on any completion). This is
+        what makes the adaptive controller usable: earlier the limit
+        only changed BETWEEN batches, and a batch lives as long as its
+        slowest transfer — ramping 10 -> 100 took a dozen batches
+        (many minutes) and most of a run crawled far below capacity.
+        """
         log.info(
             "link_request_processor_started",
             interval=self._poll_interval,
             max_concurrency=self._max_concurrency,
+            memory_budget_mb=self._memory_budget_mb,
+            budget_only=self._budget_only,
         )
         while True:
             try:
-                # Requeue rows whose worker died mid-request. Age-boxed:
-                # with several workers running, a live peer's in-flight
-                # rows are never stolen — only claims older than the
-                # stale threshold come back.
-                await self._reset_stale()
-                processed = await self.process_pending_once()
+                await self._reset_stale_throttled()
+                self._reap()
+                await self._top_up()
             except Exception as exc:  # one bad cycle must never kill the loop
                 log.error("link_request_cycle_failed", error=str(exc))
-                processed = 0
-            # A full batch means more work is likely waiting — loop
-            # immediately instead of sleeping the whole poll interval.
-            if processed < self._last_claim_limit:
+            if self._in_flight:
+                await asyncio.wait(
+                    set(self._in_flight.values()),
+                    timeout=self._poll_interval,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            else:
                 await asyncio.sleep(self._poll_interval)
+
+    async def _reset_stale_throttled(self) -> None:
+        import time as _time
+
+        now = _time.monotonic()
+        if now - self._last_stale_reset < 30:
+            return
+        self._last_stale_reset = now
+        # Requeue rows whose worker died mid-request. Age-boxed: with
+        # several workers running, a live peer's in-flight rows are
+        # never stolen — only claims older than the threshold return.
+        await self._reset_stale()
+
+    def _reap(self) -> None:
+        """Drop finished in-flight tasks, surfacing unexpected errors."""
+        for rid in [r for r, t in self._in_flight.items() if t.done()]:
+            task = self._in_flight.pop(rid)
+            if not task.cancelled() and task.exception() is not None:
+                log.error(
+                    "link_request_task_failed",
+                    request_id=rid,
+                    error=str(task.exception()),
+                )
+
+    async def shutdown(self) -> None:
+        """Cancel in-flight transfers (worker shutdown / test teardown)."""
+        tasks = list(self._in_flight.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._in_flight.clear()
 
     async def _reset_stale(self) -> None:
         try:
@@ -338,30 +394,46 @@ class LinkRequestProcessor:
         except Exception as exc:  # housekeeping must never block the queue
             log.warning("link_requests_stale_reset_failed", error=str(exc))
 
-    async def process_pending_once(self) -> int:
-        """Claim one batch atomically and process it concurrently.
+    async def _top_up(self) -> int:
+        """Claim rows up to the free capacity and start them now.
 
-        Claiming (PENDING -> PROCESSING in a single UPDATE) is what
-        makes several worker processes safe against one queue: no row
-        can be handed to two workers. Within the batch, requests run
-        concurrently up to the configured cap. Returns the batch size.
+        The supervisor's only admission point. Claiming (PENDING ->
+        PROCESSING in a single UPDATE) is what makes several worker
+        processes safe against one queue: no row can be handed to two
+        workers. Capacity = effective limit - already in flight, so a
+        finished transfer's slot is reused within one tick.
         """
         from app.db.repositories.link_request_repo import LinkRequestRepository
 
+        capacity = self._effective_claim_limit() - len(self._in_flight)
+        if capacity <= 0:
+            return 0
         async with self._session_factory() as session:
             repo = LinkRequestRepository(session)
-            claimed = await repo.claim_pending(limit=self._effective_claim_limit())
+            claimed = await repo.claim_pending(limit=capacity)
             for row in claimed:
                 # Keep loaded attributes usable after the session closes
                 # (commit would otherwise expire them).
                 session.expunge(row)
             await session.commit()
-
-        if claimed:
-            await asyncio.gather(
-                *(self._run_one(request) for request in claimed)
-            )
+        for row in claimed:
+            self._in_flight[row.id] = asyncio.create_task(self._run_one(row))
         return len(claimed)
+
+    async def process_pending_once(self) -> int:
+        """Top up once, then run everything in flight to completion.
+
+        Kept for tests and one-shot drains; production runs the
+        continuous supervisor in run_forever. Returns how many requests
+        this call claimed.
+        """
+        claimed = await self._top_up()
+        if self._in_flight:
+            await asyncio.gather(
+                *list(self._in_flight.values()), return_exceptions=True
+            )
+            self._reap()
+        return claimed
 
     async def _run_one(self, request) -> None:
         async with self._semaphore:

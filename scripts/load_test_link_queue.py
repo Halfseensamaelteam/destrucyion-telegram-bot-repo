@@ -927,20 +927,24 @@ async def run(args: argparse.Namespace) -> int:
 
     resource_task = asyncio.create_task(_resource_loop())
 
+    # Drive the processor exactly like production does (worker/main.py):
+    # its continuous run_forever supervisor, not one-shot batch passes —
+    # the test must measure the real admission behaviour.
+    processor_task = asyncio.create_task(processor.run_forever())
     deadline = started + args.timeout
     try:
         while time.monotonic() < deadline:
-            claimed = await processor.process_pending_once()
             await _refresh_counts()
             remaining = db_counts["pending"] + db_counts["processing"]
-            if claimed == 0 and remaining == 0:
+            if remaining == 0:
                 break
-            if claimed == 0:
-                await asyncio.sleep(0.25)
+            await asyncio.sleep(0.5)
     except asyncio.CancelledError:
         if not interrupted:
             raise
     finally:
+        processor_task.cancel()
+        await processor.shutdown()
         stop.set()
         await dash
         counts_task.cancel()
