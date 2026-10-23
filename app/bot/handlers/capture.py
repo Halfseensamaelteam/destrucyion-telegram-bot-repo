@@ -57,7 +57,7 @@ PAYWALL_TEXT = (
     "choose and automatically saves every protected photo & video from "
     "it to your Saved Messages.\n\n"
     "It is not included in your current plan. Activate it below, then "
-    "run /capture add <channel_id>."
+    "run `/capture add <channel_id>`."
 )
 
 SUBSCRIPTION_REQUIRED_TEXT = (
@@ -194,7 +194,7 @@ async def _capture_status(
             "🛡️ *Auto-Capture is ACTIVE*\n\n"
             f"📅 Expires: {expires_line}\n\n"
             "No channel is registered yet. Register one with:\n"
-            "/capture add <channel_id>\n\n"
+            "`/capture add <channel_id>`\n\n"
             "The channel ID is numeric only (e.g. -1001234567890), and "
             "your connected account must be a member of it.",
             parse_mode="Markdown",

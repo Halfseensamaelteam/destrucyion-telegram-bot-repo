@@ -102,7 +102,7 @@ class TelegramNotifier:
             "*Payment:* Paid\n"
             f"{expires_line}\n\n"
             "The add-on is now active. Register your channel with "
-            "/capture add <channel_id> and protected photos & videos "
+            "`/capture add <channel_id>` and protected photos & videos "
             "from it will be saved automatically."
         )
 
