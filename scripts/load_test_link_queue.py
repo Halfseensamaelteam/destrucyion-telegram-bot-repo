@@ -50,6 +50,25 @@ Examples:
       --requests-per-account 2-5 \
       --database-url postgresql+asyncpg://postgres:postgres@postgres:5432/loadtest
 
+Mixed-size scenario (size-aware disk admission): two user groups —
+many small files, fewer huge ones — against a SIMULATED disk. The
+real production DiskLeaseManager is injected with a virtual
+free-space probe (base free minus temp bytes held by fake transfers),
+and file sizes are simulated (transfers pace/count virtual bytes;
+real temp files are 1-byte stubs), so a 22 GB disk and 900 MB videos
+run fine on a laptop. The report asserts: virtual free never dropped
+below the reserve, the small class finished first, the big class kept
+moving during the small flood (no starvation), and bytes balanced
+exactly once. Wood's production-shaped case (set a high
+LINK_REQUEST_MAX_CONCURRENCY in the environment first):
+
+  docker compose run --rm --entrypoint python worker \
+      scripts/load_test_link_queue.py --confirm-scratch-db \
+      --small-accounts 400 --small-file-min-mb 10 --small-file-max-mb 80 \
+      --big-accounts 100 --big-file-min-mb 300 --big-file-max-mb 900 \
+      --virtual-free-mb 22528 --disk-reserve-mb 3072 \
+      --database-url postgresql+asyncpg://postgres:postgres@postgres:5432/loadtest
+
 Rates are PER CONNECTION (each of the DOWNLOAD_WORKERS streams of a
 file, and each upload), jittered per account. Absolute wall-times are
 simulated; the concurrency behaviour and queue correctness are real.
@@ -169,12 +188,44 @@ class ResourceStats:
         return self.cpu_sum_pct / timed if timed else 0.0
 
 
+class VirtualDisk:
+    """A simulated temp disk for the mixed-size scenario.
+
+    The lease manager reads free space from here instead of the real
+    filesystem: free = base free - temp bytes currently held by fake
+    transfers (added when a fake download starts, removed when its
+    upload finishes). File SIZES in this mode are pure simulation —
+    the fake sequential download writes a 1-byte stub — so a run can
+    model a 22 GB-free VPS disk and 900 MB videos on a machine whose
+    real temp dir is a few hundred MB. The observed minimum free is
+    recorded for the report's reserve invariant check.
+    """
+
+    def __init__(self, base_free_mb: float) -> None:
+        self.base_free_mb = float(base_free_mb)
+        self.active_temp_mb = 0.0
+        self.min_free_mb = float(base_free_mb)
+
+    def free_mb(self) -> float:
+        free = self.base_free_mb - self.active_temp_mb
+        self.min_free_mb = min(self.min_free_mb, free)
+        return free
+
+    def add_temp(self, size_bytes: int) -> None:
+        self.active_temp_mb += size_bytes / MB
+        self.free_mb()  # sample the dip
+
+    def remove_temp(self, size_bytes: int) -> None:
+        self.active_temp_mb = max(0.0, self.active_temp_mb - size_bytes / MB)
+
+
 @dataclass
 class AccountState:
     """Live per-account view for the dashboard."""
 
     account_id: int
     label: int = 0  # 1-based number within THIS run (user-001, user-002…)
+    group: str = ""  # mixed scenario only: "small" | "big"
     planned: int = 0
     done: int = 0
     failed: int = 0
@@ -254,7 +305,8 @@ class FakeTelegramClient:
 
     def __init__(self, stats: Stats, state: AccountState,
                  sizes: dict[int, int], download_bps: float,
-                 upload_bps: float, start_delay: float = 0.0) -> None:
+                 upload_bps: float, start_delay: float = 0.0,
+                 vdisk: VirtualDisk | None = None) -> None:
         self._stats = stats
         self._state = state
         self._sizes = sizes
@@ -265,6 +317,22 @@ class FakeTelegramClient:
         # account waits a random stagger once, before its first fetch.
         self._start_delay = start_delay
         self._started = False
+        # Mixed scenario only: sizes are simulated against a virtual
+        # disk — transfers pace and count VIRTUAL bytes and the temp
+        # file on the real disk is a 1-byte stub.
+        self._vdisk = vdisk
+        self._temp_size_bytes = 0  # virtual temp currently held (this client)
+        self._path_sizes: dict[str, int] = {}  # stub path -> virtual size
+
+    def _temp_begin(self, size_bytes: int) -> None:
+        if self._vdisk is not None and self._temp_size_bytes == 0:
+            self._temp_size_bytes = size_bytes
+            self._vdisk.add_temp(size_bytes)
+
+    def _temp_end(self) -> None:
+        if self._vdisk is not None and self._temp_size_bytes:
+            self._vdisk.remove_temp(self._temp_size_bytes)
+            self._temp_size_bytes = 0
 
     def _message_for(self, msg_id: int) -> FakeMessage:
         if msg_id not in self._messages:
@@ -295,6 +363,13 @@ class FakeTelegramClient:
         bps = self._download_bps
 
         async def _gen():
+            if self._vdisk is not None:
+                # Virtual mode runs with DOWNLOAD_WORKERS=1, so this
+                # should never be called; if it ever is, yielding
+                # nothing makes the production parallel downloader
+                # fail its size check and fall back to the sequential
+                # path — exactly the supported behaviour.
+                return
             stats.active_streams += 1
             stats.max_streams = max(stats.max_streams, stats.active_streams)
             try:
@@ -326,6 +401,25 @@ class FakeTelegramClient:
         stats.active_streams += 1
         stats.max_streams = max(stats.max_streams, stats.active_streams)
         try:
+            if self._vdisk is not None:
+                # Virtual mode: pace and count the VIRTUAL bytes, hold
+                # them on the virtual disk, but write only a stub — the
+                # real temp dir never sees the simulated gigabytes.
+                self._temp_begin(total)
+                self._path_sizes[dest] = total
+                pos = 0
+                while pos < total:
+                    end = min(pos + CHUNK, total)
+                    await self._pace(end - pos, self._download_bps)
+                    stats.bytes_down += end - pos
+                    st.current_done += end - pos
+                    st.total_bytes += end - pos
+                    if progress_callback is not None:
+                        progress_callback(end, total)
+                    pos = end
+                with open(dest, "wb") as fh:
+                    fh.write(b"\0")
+                return dest
             pos = 0
             with open(dest, "wb") as fh:
                 while pos < total:
@@ -345,7 +439,12 @@ class FakeTelegramClient:
     async def send_file(self, **kwargs):
         stats, st = self._stats, self._state
         path = kwargs.get("file")
-        size = os.path.getsize(path) if path and os.path.exists(path) else 0
+        if self._vdisk is not None:
+            # The real file is a 1-byte stub; the upload is paced and
+            # counted by the VIRTUAL size recorded at download time.
+            size = self._path_sizes.pop(path, 0) if path else 0
+        else:
+            size = os.path.getsize(path) if path and os.path.exists(path) else 0
         st.phase = "UP"
         st.current_total = size
         st.current_done = 0
@@ -362,6 +461,9 @@ class FakeTelegramClient:
                 remaining -= step
         finally:
             stats.active_uploads -= 1
+        # The pipeline deletes the temp file right after the upload;
+        # in virtual mode this is where the virtual temp is freed.
+        self._temp_end()
         stats.uploads += 1
         stats.sent_ids += 1
         st.phase = "WAIT"
@@ -645,8 +747,34 @@ async def run(args: argparse.Namespace) -> int:
     from app.services.restricted import LinkRequestProcessor
     from app.telegram.events import _process_message
 
+    mixed = (args.small_accounts + args.big_accounts) > 0
+    if mixed:
+        # Virtual-disk mode simulates file sizes, so the parallel
+        # downloader — which writes REAL preallocated files — must not
+        # run: DOWNLOAD_WORKERS=1 is the supported switch that keeps
+        # every transfer on the sequential path (whose fake writes a
+        # stub). Set it before settings are first read.
+        os.environ["DOWNLOAD_WORKERS"] = "1"
+        get_settings.cache_clear()
+
     rng = random.Random(args.seed)
     settings = get_settings()
+
+    vdisk: VirtualDisk | None = None
+    if mixed:
+        vdisk = VirtualDisk(args.virtual_free_mb)
+        usable_mb = max(0.0, args.virtual_free_mb - args.disk_reserve_mb)
+        print(f"MIXED SCENARIO (virtual disk): base free "
+              f"{args.virtual_free_mb:.0f} MB, reserve "
+              f"{args.disk_reserve_mb:.0f} MB -> usable {usable_mb:.0f} MB; "
+              f"big class > {args.big_file_mb:.0f} MB, pool "
+              f"{args.big_pool_percent:.0f}% of usable, guarantee "
+              f"{args.big_guarantee_percent:.0f}% fenced from small")
+        print(f"  small: {args.small_accounts} accounts x "
+              f"{args.small_file_min_mb}-{args.small_file_max_mb} MB; "
+              f"big: {args.big_accounts} accounts x "
+              f"{args.big_file_min_mb}-{args.big_file_max_mb} MB; "
+              f"real temp files are 1-byte stubs (sizes simulated)")
 
     # Temp-space preflight: every in-flight save holds one full temp
     # copy of the file (the downloader preallocates it), so the temp
@@ -658,7 +786,14 @@ async def run(args: argparse.Namespace) -> int:
 
     cap = settings.link_request_max_concurrency
     free_mb = shutil.disk_usage(tempfile.gettempdir()).free / 1e6
-    if cap <= 0:
+    if mixed:
+        # The real-temp preflight below does not apply: transfers hold
+        # VIRTUAL temp on the virtual disk, and the real temp dir only
+        # ever holds 1-byte stubs. The disk invariant is enforced by
+        # the lease manager against the virtual disk and asserted in
+        # the final report instead.
+        print(f"temp dir: {tempfile.gettempdir()} (stubs only in mixed mode)")
+    elif cap <= 0:
         # Budget-only mode: the processor's disk guard sizes slots from
         # free space, so the worst case IS the disk — derive the
         # effective in-flight count from it instead of blocking a run
@@ -670,23 +805,36 @@ async def run(args: argparse.Namespace) -> int:
               f"= {in_flight}")
     else:
         in_flight = min(cap, args.accounts)
-    needed_mb = in_flight * args.file_max_mb * 1.5
-    print(f"temp dir: {tempfile.gettempdir()}  free={free_mb:.0f} MB  "
-          f"needed~{needed_mb:.0f} MB ({in_flight} in flight x "
-          f"{args.file_max_mb} MB x1.5)")
-    if free_mb < needed_mb:
-        print("ERROR: not enough temp space for this run — lower --accounts/"
-              "--file-max-mb, lower LINK_REQUEST_MAX_CONCURRENCY, or point "
-              "TMPDIR at a bigger disk.")
-        return 2
+    if not mixed:
+        needed_mb = in_flight * args.file_max_mb * 1.5
+        print(f"temp dir: {tempfile.gettempdir()}  free={free_mb:.0f} MB  "
+              f"needed~{needed_mb:.0f} MB ({in_flight} in flight x "
+              f"{args.file_max_mb} MB x1.5)")
+        if free_mb < needed_mb:
+            print("ERROR: not enough temp space for this run — lower "
+                  "--accounts/--file-max-mb, lower "
+                  "LINK_REQUEST_MAX_CONCURRENCY, or point TMPDIR at a "
+                  "bigger disk.")
+            return 2
 
     print(f"database: {args.database_url}")
-    print(f"accounts={args.accounts} requests/account={args.requests_per_account} "
-          f"files {args.file_min_mb}-{args.file_max_mb} MB "
-          f"download={args.download_mbps} MB/s/conn upload={args.upload_mbps} MB/s "
-          f"(jittered per account) queue_concurrency="
-          f"{settings.link_request_max_concurrency} download_workers="
-          f"{settings.download_workers} seed={args.seed}")
+    if mixed:
+        total_accounts = args.small_accounts + args.big_accounts
+        print(f"accounts={total_accounts} (small {args.small_accounts} + "
+              f"big {args.big_accounts}) "
+              f"requests/account={args.requests_per_account} "
+              f"download={args.download_mbps} MB/s/conn "
+              f"upload={args.upload_mbps} MB/s (jittered per account) "
+              f"queue_concurrency={settings.link_request_max_concurrency} "
+              f"download_workers={settings.download_workers} "
+              f"seed={args.seed}")
+    else:
+        print(f"accounts={args.accounts} requests/account={args.requests_per_account} "
+              f"files {args.file_min_mb}-{args.file_max_mb} MB "
+              f"download={args.download_mbps} MB/s/conn upload={args.upload_mbps} MB/s "
+              f"(jittered per account) queue_concurrency="
+              f"{settings.link_request_max_concurrency} download_workers="
+              f"{settings.download_workers} seed={args.seed}")
 
     if args.database_url.startswith("sqlite"):
         from sqlalchemy import event
@@ -750,38 +898,56 @@ async def run(args: argparse.Namespace) -> int:
         account_repo = TelegramAccountRepository(session)
         link_repo = LinkRequestRepository(session)
         # Pass 1: accounts, clients, and each account's size plan.
+        # Mixed mode seeds two groups (small-file users, big-file
+        # users); classic mode is a single anonymous group.
+        if mixed:
+            group_specs = [
+                ("small", args.small_accounts,
+                 args.small_file_min_mb, args.small_file_max_mb),
+                ("big", args.big_accounts,
+                 args.big_file_min_mb, args.big_file_max_mb),
+            ]
+        else:
+            group_specs = [("", args.accounts,
+                            args.file_min_mb, args.file_max_mb)]
         plans: list[tuple[int, int, dict[int, int], list[int]]] = []
-        for i in range(args.accounts):
-            user = await user_repo.create(telegram_user_id=base_tg_id + i)
-            account = await account_repo.create(
-                user_id=user.id,
-                phone_masked=f"+628****{i:04d}",
-                status=TelegramAccountStatus.ACTIVE,
-            )
-            planned = rng.randint(req_lo, req_hi)
-            sizes: dict[int, int] = {}
-            msg_ids: list[int] = []
-            for _ in range(planned):
-                sizes[next_msg_id] = int(
-                    rng.uniform(args.file_min_mb, args.file_max_mb) * MB
+        acct_index = 0
+        for group_name, group_count, size_lo, size_hi in group_specs:
+            for _ in range(group_count):
+                i = acct_index
+                acct_index += 1
+                user = await user_repo.create(telegram_user_id=base_tg_id + i)
+                account = await account_repo.create(
+                    user_id=user.id,
+                    phone_masked=f"+628****{i:04d}",
+                    status=TelegramAccountStatus.ACTIVE,
                 )
-                msg_ids.append(next_msg_id)
-                next_msg_id += 1
-            st = AccountState(account_id=account.id, label=i + 1, planned=planned)
-            states.append(st)
-            states_by_account[account.id] = st
-            jitter = rng.uniform(0.6, 1.6)
-            manager.add(
-                account.id,
-                user.id,
-                FakeTelegramClient(
-                    stats, st, sizes,
-                    download_bps=args.download_mbps * MB * jitter,
-                    upload_bps=args.upload_mbps * MB * jitter,
-                    start_delay=rng.uniform(0, args.stagger_seconds),
-                ),
-            )
-            plans.append((user.id, account.id, sizes, msg_ids))
+                planned = rng.randint(req_lo, req_hi)
+                sizes: dict[int, int] = {}
+                msg_ids: list[int] = []
+                for _ in range(planned):
+                    sizes[next_msg_id] = int(rng.uniform(size_lo, size_hi) * MB)
+                    msg_ids.append(next_msg_id)
+                    next_msg_id += 1
+                st = AccountState(
+                    account_id=account.id, label=i + 1,
+                    planned=planned, group=group_name,
+                )
+                states.append(st)
+                states_by_account[account.id] = st
+                jitter = rng.uniform(0.6, 1.6)
+                manager.add(
+                    account.id,
+                    user.id,
+                    FakeTelegramClient(
+                        stats, st, sizes,
+                        download_bps=args.download_mbps * MB * jitter,
+                        upload_bps=args.upload_mbps * MB * jitter,
+                        start_delay=rng.uniform(0, args.stagger_seconds),
+                        vdisk=vdisk,
+                    ),
+                )
+                plans.append((user.id, account.id, sizes, msg_ids))
         # Pass 2: create the queue rows ROUND-ROBIN across accounts
         # (everyone's 1st request first, then everyone's 2nd, ...).
         # The processor claims oldest-first, so block-seeding one
@@ -803,7 +969,9 @@ async def run(args: argparse.Namespace) -> int:
                 request_account[row.id] = account_id
         await session.commit()
     total_requests = len(request_ids)
-    print(f"seeded {total_requests} pending requests for {args.accounts} accounts")
+    expected_bytes = sum(sum(p[2].values()) for p in plans)
+    print(f"seeded {total_requests} pending requests for {len(states)} accounts"
+          f" ({expected_bytes / MB:.0f} MB of media)")
 
     # ---- drain the queue with the real processor + live dashboard ------
     # Neutralize the operator admin notification: when the environment
@@ -822,7 +990,40 @@ async def run(args: argparse.Namespace) -> int:
 
     _admin_notify_module.notify_admin_of_capture = _noop_admin_notify
 
-    processor = LinkRequestProcessor(factory, manager, process_message=_process_message)
+    if mixed:
+        # The processor leases against the VIRTUAL disk: this is the
+        # exact production DiskLeaseManager, only its free-space probe
+        # reads the simulation (base free minus active fake temp).
+        from app.core.disk_lease import DiskLeaseManager
+
+        lease_manager = DiskLeaseManager(
+            reserve_mb=args.disk_reserve_mb,
+            big_file_mb=args.big_file_mb,
+            big_pool_percent=args.big_pool_percent,
+            big_guarantee_percent=args.big_guarantee_percent,
+            free_mb_reader=vdisk.free_mb,
+        )
+        processor = LinkRequestProcessor(
+            factory, manager, process_message=_process_message,
+            lease_manager=lease_manager,
+        )
+    else:
+        # Classic mode measures the queue/concurrency pipeline exactly
+        # as it behaved before disk admission existed, so the lease
+        # manager is injected DISABLED (reserve 0). Otherwise the
+        # settings default (3072 MB reserve) would fail every request
+        # on any machine whose real temp free is under ~4 GB — the
+        # admission system has its own scenario (mixed mode) and unit
+        # tests; in production it is driven by the real settings.
+        from app.core.disk_lease import DiskLeaseManager
+
+        processor = LinkRequestProcessor(
+            factory, manager, process_message=_process_message,
+            lease_manager=DiskLeaseManager(
+                reserve_mb=0, big_file_mb=100, big_pool_percent=30,
+                big_guarantee_percent=15, free_mb_reader=lambda: None,
+            ),
+        )
     processor._notify_owner = _no_notify.__get__(processor, LinkRequestProcessor)
 
     db_counts: dict[str, int] = {"pending": total_requests, "processing": 0}
@@ -908,10 +1109,43 @@ async def run(args: argparse.Namespace) -> int:
             elif status == LinkRequestStatus.FAILED:
                 st.failed = count
 
+    # Mixed-scenario timeline evidence for the report's invariants:
+    # when each class finished, and whether the big class was visibly
+    # moving (a transfer active, or one already done) while the small
+    # flood was still flowing — the no-starvation proof.
+    timeline = {
+        "small_done_at": None,
+        "big_done_at": None,
+        "big_progress_during_small_flood": False,
+    }
+
+    def _sample_timeline() -> None:
+        if not mixed:
+            return
+        elapsed = time.monotonic() - started
+        small_states = [s for s in states if s.group == "small"]
+        big_states = [s for s in states if s.group == "big"]
+        small_total = sum(s.planned for s in small_states)
+        small_done = sum(s.done for s in small_states)
+        big_total = sum(s.planned for s in big_states)
+        big_done = sum(s.done for s in big_states)
+        if small_total and small_done >= small_total \
+                and timeline["small_done_at"] is None:
+            timeline["small_done_at"] = elapsed
+        if big_total and big_done >= big_total \
+                and timeline["big_done_at"] is None:
+            timeline["big_done_at"] = elapsed
+        if small_total and small_done < small_total:
+            if big_done > 0 or any(
+                s.phase in ("DOWN", "UP") for s in big_states
+            ):
+                timeline["big_progress_during_small_flood"] = True
+
     async def _counts_loop() -> None:
         while not stop.is_set():
             try:
                 await _refresh_counts()
+                _sample_timeline()
             except Exception:
                 pass  # display bookkeeping must never break the drain
             await asyncio.sleep(2)
@@ -935,6 +1169,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         while time.monotonic() < deadline:
             await _refresh_counts()
+            _sample_timeline()
             remaining = db_counts["pending"] + db_counts["processing"]
             if remaining == 0:
                 break
@@ -955,6 +1190,11 @@ async def run(args: argparse.Namespace) -> int:
             except (NotImplementedError, RuntimeError):
                 pass
     wall = time.monotonic() - started
+    try:
+        await _refresh_counts()
+        _sample_timeline()
+    except Exception:
+        pass  # the row-level report below is authoritative anyway
 
     # ---- final report ---------------------------------------------------
     async with factory() as session:
@@ -1001,8 +1241,58 @@ async def run(args: argparse.Namespace) -> int:
               f"p50={_pct(0.50):.1f}s p95={_pct(0.95):.1f}s max={latencies[-1]:.1f}s")
     if failed:
         print("first failure:", failed[0].error)
+    mixed_ok = True
+    if mixed:
+        group_by_account = {s.account_id: s.group for s in states}
+
+        def _class_rows(name):
+            return [r for r in rows
+                    if group_by_account.get(request_account[r.id]) == name]
+
+        small_rows = _class_rows("small")
+        big_rows = _class_rows("big")
+        small_done_n = sum(
+            1 for r in small_rows if r.status == LinkRequestStatus.DONE)
+        big_done_n = sum(
+            1 for r in big_rows if r.status == LinkRequestStatus.DONE)
+        reserve_kept = vdisk.min_free_mb >= args.disk_reserve_mb - 1e-9
+        bytes_balanced = (
+            stats.bytes_down == expected_bytes
+            and stats.bytes_up == expected_bytes
+        )
+        small_first = (
+            timeline["small_done_at"] is not None
+            and timeline["big_done_at"] is not None
+            and timeline["small_done_at"] <= timeline["big_done_at"]
+        )
+        print("\n---- mixed scenario (virtual disk) ----")
+        print(f"virtual disk: base free {vdisk.base_free_mb:.0f} MB, "
+              f"reserve {args.disk_reserve_mb:.0f} MB, "
+              f"min free observed {vdisk.min_free_mb:.0f} MB "
+              f"-> reserve kept: {'YES' if reserve_kept else 'NO'}")
+        print(f"small class: {small_done_n}/{len(small_rows)} done"
+              + (f", all done at {timeline['small_done_at']:.1f}s"
+                 if timeline["small_done_at"] is not None else ""))
+        print(f"big class:   {big_done_n}/{len(big_rows)} done"
+              + (f", all done at {timeline['big_done_at']:.1f}s"
+                 if timeline["big_done_at"] is not None else ""))
+        print(f"big progress during small flood (no starvation): "
+              f"{'YES' if timeline['big_progress_during_small_flood'] else 'NO'}")
+        print(f"small class finished before big class: "
+              f"{'YES' if small_first else 'NO'}")
+        print(f"bytes balanced (down == up == planned "
+              f"{expected_bytes / MB:.0f} MB): "
+              f"{'YES' if bytes_balanced else 'NO'}")
+        mixed_ok = (
+            reserve_kept and bytes_balanced
+            and small_done_n == len(small_rows)
+            and big_done_n == len(big_rows)
+            and (timeline["big_progress_during_small_flood"]
+                 or not small_rows or not big_rows)
+            and (small_first or not small_rows or not big_rows)
+        )
     ok = (len(done) == total_requests and not done_empty
-          and stats.uploads == total_requests)
+          and stats.uploads == total_requests and mixed_ok)
     if interrupted:
         print("verdict: PARTIAL — stopped early by the user")
         return 130
@@ -1035,11 +1325,42 @@ def main() -> None:
                              "not a TTY (e.g. watching via docker logs -f)")
     parser.add_argument("--database-url", default="sqlite+aiosqlite:///./loadtest.db")
     parser.add_argument("--timeout", type=float, default=3600)
+    # Mixed-size scenario (size-aware disk admission): two user groups
+    # on a SIMULATED disk. Activated when either group count is > 0;
+    # --accounts/--file-* are then ignored.
+    parser.add_argument("--small-accounts", type=int, default=0,
+                        help="mixed scenario: users saving small files")
+    parser.add_argument("--small-file-min-mb", type=float, default=10)
+    parser.add_argument("--small-file-max-mb", type=float, default=80)
+    parser.add_argument("--big-accounts", type=int, default=0,
+                        help="mixed scenario: users saving big files")
+    parser.add_argument("--big-file-min-mb", type=float, default=300)
+    parser.add_argument("--big-file-max-mb", type=float, default=900)
+    parser.add_argument("--virtual-free-mb", type=float, default=22528,
+                        help="mixed scenario: simulated free temp disk "
+                             "at start (default ~ the production VPS's "
+                             "22 GB free)")
+    parser.add_argument("--disk-reserve-mb", type=float, default=3072,
+                        help="mixed scenario: LINK_REQUEST_DISK_RESERVE_MB "
+                             "equivalent for the injected lease manager")
+    parser.add_argument("--big-file-mb", type=float, default=100,
+                        help="mixed scenario: big-class threshold (MB)")
+    parser.add_argument("--big-pool-percent", type=float, default=30,
+                        help="mixed scenario: big-class pool, % of usable")
+    parser.add_argument("--big-guarantee-percent", type=float, default=15,
+                        help="mixed scenario: big guarantee fenced from "
+                             "small leases, % of usable")
     parser.add_argument("--confirm-scratch-db", action="store_true",
                         help="required: confirms the target DB is a scratch DB")
     args = parser.parse_args()
     if args.file_mb is not None:
         args.file_min_mb = args.file_max_mb = args.file_mb
+    if (args.small_accounts + args.big_accounts) > 0 and (
+        args.virtual_free_mb <= args.disk_reserve_mb + 1024
+    ):
+        parser.error("--virtual-free-mb must exceed --disk-reserve-mb "
+                     "by more than 1024 MB, or no file can ever be "
+                     "admitted on the virtual disk")
     if not args.confirm_scratch_db:
         parser.error("refusing to run without --confirm-scratch-db "
                      "(see the safety note in this file's docstring)")
