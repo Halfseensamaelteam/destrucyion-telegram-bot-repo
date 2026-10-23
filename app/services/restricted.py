@@ -255,6 +255,7 @@ class LinkRequestProcessor:
         disk_big_file_mb: int | None = None,
         disk_big_pool_percent: int | None = None,
         disk_big_guarantee_percent: int | None = None,
+        disk_class_idle_grace_seconds: float | None = None,
         lease_manager: DiskLeaseManager | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -325,6 +326,11 @@ class LinkRequestProcessor:
                     settings.link_request_big_guarantee_percent
                     if disk_big_guarantee_percent is None
                     else disk_big_guarantee_percent
+                ),
+                idle_grace_seconds=(
+                    settings.link_request_class_idle_grace_seconds
+                    if disk_class_idle_grace_seconds is None
+                    else disk_class_idle_grace_seconds
                 ),
                 free_mb_reader=lambda: self._temp_free_reader(),
             )
@@ -420,7 +426,10 @@ class LinkRequestProcessor:
                 self._reap()
                 # Lease waiters normally wake on releases; the tick
                 # also covers free space changed by OTHER tenants of
-                # the disk (logs, another container, the operator).
+                # the disk (logs, another container, the operator)
+                # and class idle-grace expiries, which can unblock
+                # big/small waiters with no release at all (the
+                # work-conserving borrowing in app.core.disk_lease).
                 self._lease_manager.kick()
                 await self._top_up()
             except Exception as exc:  # one bad cycle must never kill the loop

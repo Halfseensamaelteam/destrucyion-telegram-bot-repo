@@ -183,8 +183,9 @@ untuk load test di atas (di sana nilainya disuntik dari flag):
 |---|---|---|
 | `LINK_REQUEST_DISK_RESERVE_MB` | `3072` | Ruang disk yang selalu disisakan bebas. Isi `0` = fitur mati total, perilaku persis seperti sebelumnya. |
 | `LINK_REQUEST_BIG_FILE_MB` | `100` | Request dengan TOTAL ukuran di atas ini masuk kelas besar. |
-| `LINK_REQUEST_BIG_POOL_PERCENT` | `30` | Kelas besar boleh menyewa maksimal sekian % dari disk yang bisa dipakai. |
-| `LINK_REQUEST_BIG_GUARANTEE_PERCENT` | `15` | Sekian % disk yang bisa dipakai dipagari dari sewa file kecil, supaya kelas besar selalu bisa mulai. |
+| `LINK_REQUEST_BIG_POOL_PERCENT` | `30` | Kelas besar boleh menyewa maksimal sekian % dari disk yang bisa dipakai — selama kelas kecil ada. |
+| `LINK_REQUEST_BIG_GUARANTEE_PERCENT` | `15` | Sekian % disk yang bisa dipakai dipagari dari sewa file kecil, supaya kelas besar selalu bisa mulai — selama kelas besar ada. |
+| `LINK_REQUEST_CLASS_IDLE_GRACE_SECONDS` | `30` | Sebuah kelas masih dianggap "ada" selama sekian detik setelah sewa terakhirnya. Kalau satu kelas tidak ada, kelas lain boleh meminjam seluruh disk yang bisa dipakai (mis. file besar melebar melewati pool setelah banjir file kecil selesai). |
 
 ## 7. Cara kembali
 

@@ -95,8 +95,9 @@ arrival is the only reliable moment.
 | `LINK_REQUEST_STALE_SECONDS` | `600` | A claimed request older than this is requeued as abandoned |
 | `LINK_REQUEST_DISK_RESERVE_MB` | `3072` | Temp disk that must always stay free; `0` disables size-aware disk admission |
 | `LINK_REQUEST_BIG_FILE_MB` | `100` | A request whose total media size exceeds this is big class |
-| `LINK_REQUEST_BIG_POOL_PERCENT` | `30` | Big class may lease at most this % of usable disk |
-| `LINK_REQUEST_BIG_GUARANTEE_PERCENT` | `15` | % of usable fenced off from small leases for the big class |
+| `LINK_REQUEST_BIG_POOL_PERCENT` | `30` | Big class may lease at most this % of usable disk (while the small class is present) |
+| `LINK_REQUEST_BIG_GUARANTEE_PERCENT` | `15` | % of usable fenced off from small leases for the big class (while the big class is present) |
+| `LINK_REQUEST_CLASS_IDLE_GRACE_SECONDS` | `30` | A class counts as present this long after its last lease grant; while a class is absent, the other may borrow the whole usable disk |
 
 ## Concurrency & multiple workers
 
@@ -184,6 +185,21 @@ Requests split into two classes by TOTAL size
   waiting big ones; a waiter that still does not fit never blocks the
   other class behind it.
 
+The split is **work-conserving**: both protections bind only while
+the class they protect against is *present* — holding leases,
+waiting for one, or granted one within
+`LINK_REQUEST_CLASS_IDLE_GRACE_SECONDS` (default 30 s; the grace
+covers the gaps between claim batches, so a momentary lull mid-flood
+does not hand the whole disk over). Once a class is absent, the
+other may borrow the *entire* usable disk: when the small flood has
+drained, big transfers expand past the pool into the freed space
+instead of crawling at the pool rate next to gigabytes of idle disk,
+and while no big request is anywhere in sight, small leases ignore
+the guarantee fence. Existing leases are never preempted, so a small
+request that arrives while big transfers hold borrowed space waits
+for natural big completions — leases release per file, and the
+first release usually frees enough for one small file.
+
 Edge cases, deliberately: a file larger than the whole usable budget
 may run SOLO once nothing else is leased, provided it fits the disk
 with 1 GB to spare; a file that cannot fit even an empty disk FAILS
@@ -203,7 +219,11 @@ small class runs at the full 200 slot cap (≈200 × ≤80 MB) and drains
 first. The big pool is 30% × 19 GB ≈ 5.7 GB, so roughly 6–19 big
 videos (at 900 MB / 300 MB) transfer at any moment — continuously,
 never zero, because the 2.9 GB guarantee is fenced off from the small
-flood — while the remaining big requests wait their turn. Free disk
+flood — while the remaining big requests wait their turn. And once
+the small flood has drained (plus the 30 s grace), the pool cap
+lifts: the remaining big videos expand into the full 19 GB usable,
+so the tail of the big queue runs at full disk instead of staying
+parked at ~5.7 GB next to idle space. Free disk
 never drops below the 3 GB reserve no matter how the two floods mix.
 `scripts/load_test_link_queue.py` reproduces this exact scenario
 against a simulated disk (see its `--small-accounts` / `--big-accounts`

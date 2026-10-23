@@ -23,7 +23,32 @@ class FakeDisk:
         return self.free_mb
 
 
-def make_manager(disk, *, reserve=100.0, big_file=100.0, pool=30.0, guarantee=15.0):
+class FakeClock:
+    """time_reader stand-in: monotonic time the test advances by hand,
+    so class presence / the idle-grace window is deterministic. A
+    frozen clock means the grace window never expires mid-test unless
+    the test advances it on purpose."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def make_manager(
+    disk,
+    *,
+    reserve=100.0,
+    big_file=100.0,
+    pool=30.0,
+    guarantee=15.0,
+    grace=30.0,
+    clock=None,
+):
     # Defaults: usable = free - 100; big pool = 30% of usable;
     # big guarantee = 15% of usable fenced off from small leases.
     return DiskLeaseManager(
@@ -31,7 +56,9 @@ def make_manager(disk, *, reserve=100.0, big_file=100.0, pool=30.0, guarantee=15
         big_file_mb=big_file,
         big_pool_percent=pool,
         big_guarantee_percent=guarantee,
+        idle_grace_seconds=grace,
         free_mb_reader=disk,
+        time_reader=clock if clock is not None else FakeClock(),
     )
 
 
@@ -64,17 +91,21 @@ async def test_total_cap_enforced_and_release_wakes_waiter():
 
 
 async def test_big_pool_cap_enforced():
+    """While the small class is PRESENT, big leases share the pool cap
+    — the work-conserving expansion only applies once small is gone."""
     disk = FakeDisk(1100.0)  # usable 1000 -> pool cap = max(300, size)
     mgr = make_manager(disk)
+    small = await mgr.acquire(50.0)  # a small lease holds: small present
     first = await mgr.acquire(250.0)  # big: pool usage 250/300
     assert first.is_big is True
     waiter = asyncio.create_task(mgr.acquire(250.0))
     await asyncio.sleep(0.05)
-    # Total would fit (500 <= 1000) but the big pool (300) would not.
+    # Total would fit (550 <= 1000) but the big pool (300) would not.
     assert not waiter.done()
     first.release()
     second = await asyncio.wait_for(waiter, timeout=1.0)
     second.release()
+    small.release()
 
 
 async def test_single_big_file_bigger_than_pool_still_admitted():
@@ -89,8 +120,15 @@ async def test_single_big_file_bigger_than_pool_still_admitted():
 
 
 async def test_small_cannot_eat_big_guarantee_and_big_still_gets_in():
+    """Contention case (BOTH classes present): the guarantee fence
+    caps the small flood and the big class still leases into it."""
     disk = FakeDisk(1100.0)  # usable 1000, guarantee 150
     mgr = make_manager(disk)
+    # The big class counts as present — it was granted a lease a
+    # moment ago, inside the idle-grace window — so the fence is up
+    # even though it currently holds nothing.
+    primer = await mgr.acquire(150.0)
+    primer.release()
     flood = await mgr.acquire(85.0)  # small class flooding begins
     for _ in range(9):
         await mgr.acquire(85.0)  # 850 total leased by small class
@@ -211,3 +249,121 @@ async def test_classification_boundary():
     mgr = make_manager(disk, big_file=100.0)
     assert mgr.is_big(100.0) is False  # strictly greater than threshold
     assert mgr.is_big(100.1) is True
+
+
+# ---------------------------------------------------------------------
+# Work-conserving borrowing: protections bind only while the class
+# they protect against is PRESENT (active / waiting / within grace).
+# ---------------------------------------------------------------------
+
+
+async def test_big_expands_after_small_drains_and_grace_passes():
+    """Wood's scenario in miniature: while small is active the pool
+    binds; after the small class drains AND the grace window passes,
+    a kick ALONE (no release at that moment) grants the big waiter
+    beyond the pool."""
+    clock = FakeClock()
+    disk = FakeDisk(1100.0)  # usable 1000, pool 300
+    mgr = make_manager(disk, clock=clock)
+    small = await mgr.acquire(50.0)
+    big1 = await mgr.acquire(250.0)  # pool usage 250/300
+    waiter = asyncio.create_task(mgr.acquire(400.0))
+    await asyncio.sleep(0.05)
+    # Total fits (700 <= 1000) but 250 + 400 > pool cap 400: blocked.
+    assert not waiter.done()
+    small.release()
+    mgr.kick()
+    await asyncio.sleep(0.05)
+    # Small holds nothing any more, but its last grant is still
+    # inside the grace window — expansion must NOT happen yet.
+    assert not waiter.done()
+    clock.advance(31.0)  # grace (30s) expires
+    mgr.kick()  # no release happens here: the kick alone must grant
+    lease = await asyncio.wait_for(waiter, timeout=1.0)
+    assert mgr.big_leased_mb == 650.0  # 250 + 400, far past pool 300
+    lease.release()
+    big1.release()
+
+
+async def test_big_does_not_expand_while_small_lease_active():
+    """An ACTIVE small lease keeps the small class present forever —
+    the grace window expiring changes nothing."""
+    clock = FakeClock()
+    disk = FakeDisk(1100.0)
+    mgr = make_manager(disk, clock=clock)
+    small = await mgr.acquire(50.0)
+    big1 = await mgr.acquire(250.0)
+    waiter = asyncio.create_task(mgr.acquire(400.0))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    clock.advance(3600.0)  # way past grace — irrelevant while active
+    mgr.kick()
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    small.release()  # now small truly leaves (grant is ancient history)
+    lease = await asyncio.wait_for(waiter, timeout=1.0)
+    lease.release()
+    big1.release()
+
+
+async def test_big_blocked_by_grace_alone_then_expands():
+    """Presence can come from the grace window ALONE: the small lease
+    is released before the big class even arrives, yet the pool still
+    binds until the window passes."""
+    clock = FakeClock()
+    disk = FakeDisk(1100.0)
+    mgr = make_manager(disk, clock=clock)
+    primer = await mgr.acquire(50.0)  # small was here...
+    primer.release()  # ...but holds nothing from now on
+    big1 = await mgr.acquire(250.0)  # granted within the pool (300)
+    waiter = asyncio.create_task(mgr.acquire(400.0))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()  # pool binds thanks to grace alone
+    clock.advance(29.0)  # still inside the 30s window
+    mgr.kick()
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    clock.advance(2.0)  # 31s after the last small grant: window over
+    mgr.kick()
+    lease = await asyncio.wait_for(waiter, timeout=1.0)
+    lease.release()
+    big1.release()
+
+
+async def test_small_fence_drops_when_big_class_absent():
+    """No big request anywhere: small leases use the WHOLE usable
+    disk — the 15% guarantee (150 MB here) is not fenced off."""
+    disk = FakeDisk(1100.0)  # usable 1000; old fence ceiling was 850
+    mgr = make_manager(disk)
+    leases = [await mgr.acquire(100.0) for _ in range(10)]
+    assert mgr.total_leased_mb == 1000.0  # leases 9 and 10 pass 850
+    for lease in leases:
+        lease.release()
+
+
+async def test_small_fence_active_while_big_present():
+    """Mirror image: while a big lease is active the guarantee fence
+    binds small leases — and it binds by the part of the guarantee
+    the big class is NOT using (150 - 120 = 30 fenced here)."""
+    clock = FakeClock()
+    disk = FakeDisk(1100.0)  # usable 1000, guarantee 150
+    mgr = make_manager(disk, clock=clock)
+    big = await mgr.acquire(120.0)  # big present, holding 120 of it
+    leases = [await mgr.acquire(100.0) for _ in range(8)]  # small 800
+    leases.append(await mgr.acquire(50.0))  # total hits ceiling 970
+    assert mgr.total_leased_mb == 970.0
+    waiter = asyncio.create_task(mgr.acquire(10.0))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()  # 970 + 10 > usable - (150 - 120)
+    big.release()
+    await asyncio.sleep(0.05)
+    # Counter-intuitive but correct: releasing the big lease does NOT
+    # free small space here — the fence grows back to the full 150
+    # (150 - 0), so the small ceiling (850) matches the leased 850.
+    assert not waiter.done()
+    clock.advance(31.0)  # big class leaves (grace over): fence drops
+    mgr.kick()
+    granted = await asyncio.wait_for(waiter, timeout=1.0)
+    granted.release()
+    for lease in leases:
+        lease.release()

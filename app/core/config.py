@@ -249,6 +249,19 @@ class Settings(BaseSettings):
             "flood (no starvation in either direction)."
         ),
     )
+    link_request_class_idle_grace_seconds: float = Field(
+        default=30.0,
+        ge=0,
+        description=(
+            "Size-aware disk admission: the pool/guarantee split is "
+            "work-conserving — a class's protection only binds while "
+            "that class is PRESENT (holding leases, waiting for one, "
+            "or granted one within this grace window, which covers "
+            "the gaps between claim batches). While a class is "
+            "absent, the other class may borrow the whole usable "
+            "disk instead of idling next to free space."
+        ),
+    )
     display_timezone: str = Field(
         default="UTC",
         description=(

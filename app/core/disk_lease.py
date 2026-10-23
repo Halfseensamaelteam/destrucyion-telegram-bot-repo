@@ -27,6 +27,26 @@ TOTAL size):
     small leases, so the big class always has room to start — it can
     never be starved by the small flood either.
 
+Both protections are WORK-CONSERVING: they bind only while the class
+they protect against is actually PRESENT. A class is present while it
+holds leases, has leases waiting, or was granted a lease within the
+idle-grace window (LINK_REQUEST_CLASS_IDLE_GRACE_SECONDS — the grace
+covers the gaps between claim batches, so a momentary lull mid-flood
+does not hand the whole disk over). The moment a class is absent, the
+other class may borrow the ENTIRE usable disk: once the small flood
+has drained, big transfers expand past the pool into the freed space
+instead of crawling at the pool rate next to gigabytes of idle disk —
+and while no big request is anywhere in sight, small leases are not
+held back by the guarantee fence either.
+
+The accepted trade-off of borrowing: existing leases are never
+preempted, so if the big class borrowed the whole disk and a small
+request then arrives, the small request waits for natural big
+completions (leases release per file, and the first release usually
+frees enough for one small file). The grace window keeps this rare:
+a class that was active seconds ago still counts as present, so the
+disk is only ever lent out after a genuine lull.
+
 "Usable" is measured live at every admission decision:
 
     usable = max(0, temp_free_mb() - LINK_REQUEST_DISK_RESERVE_MB)
@@ -57,6 +77,7 @@ the pre-existing behaviour.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -132,15 +153,30 @@ class DiskLeaseManager:
         big_pool_percent: float,
         big_guarantee_percent: float,
         free_mb_reader: Callable[[], float | None],
+        idle_grace_seconds: float = 30.0,
+        time_reader: Callable[[], float] = time.monotonic,
     ) -> None:
         self._reserve_mb = float(reserve_mb)
         self._big_file_mb = float(big_file_mb)
         self._big_pool_percent = float(big_pool_percent)
         self._big_guarantee_percent = float(big_guarantee_percent)
         self._free_mb_reader = free_mb_reader
+        self._idle_grace_seconds = float(idle_grace_seconds)
+        self._time_reader = time_reader
         self._total_mb = 0.0
         self._big_mb = 0.0
         self._waiters: list[_Waiter] = []
+        # Class presence (work-conserving borrowing): a class counts
+        # as present while it holds leases, has waiters, or was last
+        # granted a lease less than idle_grace_seconds ago. The grant
+        # timestamps below feed the third condition.
+        self._last_small_grant_at: float | None = None
+        self._last_big_grant_at: float | None = None
+        # Borrowing state derived from presence, tracked only so its
+        # transitions can be logged: big borrows when small is absent,
+        # small borrows when big is absent. None = not yet evaluated.
+        self._big_borrowing: bool | None = None
+        self._small_borrowing: bool | None = None
 
     # -- introspection -------------------------------------------------
 
@@ -216,9 +252,12 @@ class DiskLeaseManager:
         return DiskLease(self, waiter.size_mb, waiter.is_big)
 
     def kick(self) -> None:
-        """Re-run the grant pass (e.g. on the supervisor's tick, so
-        waiters also wake when EXTERNAL disk usage changes, not only
-        when one of our own leases is released)."""
+        """Re-run the grant pass (e.g. on the supervisor's tick).
+
+        Covers two things releases cannot: waiters wake when EXTERNAL
+        disk usage changes, and waiters unblock when a class's idle
+        grace EXPIRES — the moment the other class may start borrowing
+        the whole usable disk, no release needs to happen at all."""
         if self.enabled:
             self._grant_pass()
 
@@ -230,7 +269,56 @@ class DiskLeaseManager:
             self._big_mb = max(0.0, self._big_mb - size_mb)
         self._grant_pass()
 
+    def _class_present(self, *, is_big: bool, now: float) -> bool:
+        """Is this class here right now — holding leases, waiting for
+        one, or granted one within the idle-grace window? Only a
+        PRESENT class's counterpart protections bind; see the module
+        docstring (work-conserving borrowing)."""
+        if is_big:
+            if self._big_mb > _EPS:
+                return True
+            last_grant = self._last_big_grant_at
+        else:
+            if self._total_mb - self._big_mb > _EPS:
+                return True
+            last_grant = self._last_small_grant_at
+        if any(w.is_big == is_big for w in self._waiters):
+            return True
+        return (
+            last_grant is not None
+            and (now - last_grant) < self._idle_grace_seconds
+        )
+
+    def _note_expansion(
+        self, *, small_present: bool, big_present: bool
+    ) -> None:
+        """Track and log borrowing transitions: big borrows the whole
+        usable disk while small is absent, small borrows (no guarantee
+        fence) while big is absent. Evaluated on EVERY pass — acquire,
+        release and kick() alike — so a grace expiry is noticed on the
+        supervisor's next tick even when nothing else happened."""
+        for cls, borrowing, attr in (
+            ("big", not small_present, "_big_borrowing"),
+            ("small", not big_present, "_small_borrowing"),
+        ):
+            previous = getattr(self, attr)
+            if previous is not None and previous != borrowing:
+                log.info(
+                    "link_request_disk_lease_expansion_changed",
+                    borrowing_class=cls,
+                    borrowing=borrowing,
+                    small_present=small_present,
+                    big_present=big_present,
+                )
+            setattr(self, attr, borrowing)
+
     def _grant_pass(self) -> None:
+        now = self._time_reader()
+        small_present = self._class_present(is_big=False, now=now)
+        big_present = self._class_present(is_big=True, now=now)
+        self._note_expansion(
+            small_present=small_present, big_present=big_present
+        )
         if not self._waiters:
             return
         free = self._free_mb_reader()
@@ -244,12 +332,22 @@ class DiskLeaseManager:
         for waiter in ordered:
             if waiter not in self._waiters:
                 continue
-            verdict = self._verdict(waiter.size_mb, waiter.is_big, free, usable)
+            verdict = self._verdict(
+                waiter.size_mb,
+                waiter.is_big,
+                free,
+                usable,
+                small_present=small_present,
+                big_present=big_present,
+            )
             if verdict == "grant":
                 self._waiters.remove(waiter)
                 self._total_mb += waiter.size_mb
                 if waiter.is_big:
                     self._big_mb += waiter.size_mb
+                    self._last_big_grant_at = now
+                else:
+                    self._last_small_grant_at = now
                 waiter.granted = True
                 waiter.event.set()
                 log.info(
@@ -285,6 +383,9 @@ class DiskLeaseManager:
         is_big: bool,
         free: float | None,
         usable: float | None,
+        *,
+        small_present: bool,
+        big_present: bool,
     ) -> str:
         """'grant' | 'wait' | 'impossible' for one prospective lease."""
         if free is None or usable is None:
@@ -306,19 +407,30 @@ class DiskLeaseManager:
         if self._total_mb + size_mb > usable:
             return "wait"
         if is_big:
-            # The pool caps the big class — with one exception: a
-            # single big file bigger than the whole pool must still be
-            # admittable on an empty disk, so the cap never drops
-            # below the file's own size (bounded by usable above).
-            pool_cap = max(
-                usable * self._big_pool_percent / 100.0,
-                min(size_mb, usable),
-            )
+            if small_present:
+                # The pool caps the big class — with one exception: a
+                # single big file bigger than the whole pool must
+                # still be admittable on an empty disk, so the cap
+                # never drops below the file's own size (bounded by
+                # usable above).
+                pool_cap = max(
+                    usable * self._big_pool_percent / 100.0,
+                    min(size_mb, usable),
+                )
+            else:
+                # Small class absent: the pool is work-conserving and
+                # big leases may borrow the whole usable disk — only
+                # the hard total cap (checked above) still binds, so
+                # this cap is exactly what remains after small leases.
+                pool_cap = usable - (self._total_mb - self._big_mb)
             if self._big_mb + size_mb > pool_cap:
                 return "wait"
-        else:
+        elif big_present:
             # Small leases may not eat the part of the big guarantee
-            # the big class is not already using.
+            # the big class is not already using — but only while the
+            # big class is present. While it is absent the fence is
+            # dropped entirely (work-conserving): the hard total cap
+            # above is the only limit.
             guarantee = usable * self._big_guarantee_percent / 100.0
             small_ceiling = usable - max(0.0, guarantee - self._big_mb)
             if self._total_mb + size_mb > small_ceiling:
