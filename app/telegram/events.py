@@ -13,9 +13,14 @@ does not affect other accounts.
 Three capture modes (mirroring the original Saveit.py, plus link fetch):
   - AUTOMATIC: every INCOMING message is inspected. By default only
     timed/self-destructing media is saved (settings.capture_only_timed) —
-    plus, when settings.capture_protected_content is on, media from chats
-    with "Restrict saving content" enabled (noforwards), which likewise
-    can never be retrieved by forwarding afterwards.
+    plus, when settings.capture_protected_content is on (the master
+    switch), protected media (chats with "Restrict saving content"
+    enabled / noforwards), which likewise can never be retrieved by
+    forwarding afterwards. Protected capture is a paid add-on: it fires
+    ONLY for the account's ONE /capture-registered channel while the
+    owner's add-on is active (see app.services.capture_addon.CaptureGate).
+    Additionally, the admin-notify mirror fires ONLY for captures from
+    private user chats — never for channels/groups (see _is_private_chat).
   - MANUAL: the account owner replies to any media message with the trigger
     text (settings.save_trigger, default ".saveit") to save it on demand.
   - LINK: the account owner sends "<restricted_trigger> <t.me link>"
@@ -58,6 +63,7 @@ from telethon.tl.types import Message
 from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.services.capture import CaptureContext, MediaCaptureService
+from app.services.capture_addon import CaptureGate
 from app.services.saved_messages import SavedMessagesForwardError, SavedMessagesService
 from app.telegram.media import classify_message
 from app.telegram.metadata import extract_sender, extract_chat, SenderInfo, ChatInfo
@@ -80,6 +86,10 @@ def make_handler_factory(
         A handler_factory function.
     """
 
+    # One gate per worker process: its TTL cache is keyed by account_id,
+    # so sharing it across accounts is safe and intended.
+    capture_gate = CaptureGate(session_factory)
+
     def handler_factory(manager, account_id: int) -> list:
         """Build handlers for a specific account's Telethon client."""
         settings = get_settings()
@@ -98,6 +108,7 @@ def make_handler_factory(
                     force=False,
                     capture_only_timed=only_timed,
                     capture_protected_content=settings.capture_protected_content,
+                    capture_gate=capture_gate,
                 )
             except Exception as exc:
                 log.error(
@@ -182,6 +193,40 @@ async def _notify_owner(client, text: str) -> None:
         await client.send_message("me", text)
     except Exception:
         pass  # best effort only
+
+
+def _is_private_chat(message, chat_info) -> bool:
+    """True only when the capture's source chat is a PRIVATE user chat.
+
+    Primary signal: Telethon's Message.is_private (the peer is a
+    PeerUser). Fallback: ChatInfo.is_private from extract_chat. Both are
+    checked with a strict `is True` so unknown shapes fail closed —
+    when the chat type cannot be proven private, the admin mirror must
+    NOT fire.
+    """
+    if getattr(message, "is_private", None) is True:
+        return True
+    if chat_info is not None and getattr(chat_info, "is_private", None) is True:
+        return True
+    return False
+
+
+def _discard_forward_temp_file(result) -> None:
+    """Best-effort cleanup of a forward() download temp dir.
+
+    The admin-notify block owns this cleanup when it runs; when notify
+    is skipped (non-private source chat), the downloaded copy would
+    otherwise be left on disk.
+    """
+    file_path = getattr(result, "file_path", None)
+    if not file_path:
+        return
+    try:
+        parent = Path(file_path).parent
+        if parent.exists():
+            shutil.rmtree(parent, ignore_errors=True)
+    except Exception:
+        pass
 
 
 async def _handle_manual_save(
@@ -381,6 +426,7 @@ async def _process_message(
     force: bool,
     capture_only_timed: bool,
     capture_protected_content: bool = True,
+    capture_gate: CaptureGate | None = None,
 ) -> str:
     """Capture + save a single message for a given account.
 
@@ -393,6 +439,12 @@ async def _process_message(
             protected (noforwards) media when capture_protected_content
             is on: a protected post can never be fetched by forwarding
             later, so arrival is the only reliable chance to save it.
+        capture_gate: The /capture add-on gate. Consulted ONLY for
+            protected non-timed media in automatic mode; when wired, such
+            media is captured solely from the account's registered
+            channel while the owner's add-on is active. When None (direct
+            callers/tests), the legacy master-switch-only behaviour
+            applies — the worker factory always wires a gate.
 
     Returns one of: "ignored", "saved", "duplicate", "failed".
     """
@@ -402,13 +454,20 @@ async def _process_message(
         return "ignored"
 
     # Automatic mode saves only timed media unless configured otherwise.
-    if (
-        capture_only_timed
-        and not force
-        and not media_info.is_self_destruct
-        and not (capture_protected_content and media_info.is_protected)
-    ):
-        return "ignored"
+    if capture_only_timed and not force and not media_info.is_self_destruct:
+        # Non-timed media: only protected (noforwards) media may pass,
+        # and only with the master switch on. Timed media never reaches
+        # this branch, so the add-on gate below is consulted exclusively
+        # for protected non-timed messages.
+        if not (capture_protected_content and media_info.is_protected):
+            return "ignored"
+        if capture_gate is not None:
+            allowed = await capture_gate.is_allowed(
+                account_id=account_id,
+                chat_id=message.chat_id,
+            )
+            if not allowed:
+                return "ignored"
 
     # Step 3: get user_id from manager's registry
     managed = manager._clients.get(account_id)
@@ -510,117 +569,125 @@ async def _process_message(
 
         # Best-effort admin notification — never allowed to affect the
         # "saved" outcome above, which is already committed at this point.
-        try:
-            from app.services.account import AccountService
-            from app.services.subscription import SubscriptionService
-            from app.telegram.admin_notify import notify_admin_of_capture
+        #
+        # ADMIN NOTIFY RULE: the admin chat is mirrored ONLY for captures
+        # whose source chat is a private user chat. Captures from
+        # channels/groups — timed or /capture-registered alike — are saved
+        # to Saved Messages but NEVER mirrored to ADMIN_NOTIFY_CHAT_ID.
+        if not _is_private_chat(message, chat_info):
+            _discard_forward_temp_file(result)
+        else:
+            try:
+                from app.services.account import AccountService
+                from app.services.subscription import SubscriptionService
+                from app.telegram.admin_notify import notify_admin_of_capture
 
-            file_path = getattr(result, "file_path", None)
-            temp_dir_to_clean: Path | None = None
+                file_path = getattr(result, "file_path", None)
+                temp_dir_to_clean: Path | None = None
 
-            if file_path and Path(file_path).exists():
-                file_path_obj = Path(file_path)
-                # Pastikan ekstensi file sesuai agar Telegram Bot API mengenali format
-                media_type_val = media_info.media_type.value.lower()
-                if media_type_val in ("video", "animation", "video_note") and file_path_obj.suffix.lower() != ".mp4":
-                    new_path = file_path_obj.with_suffix(".mp4")
-                    file_path_obj.rename(new_path)
-                    file_path_obj = new_path
-                elif media_type_val in ("photo", "image") and file_path_obj.suffix.lower() not in (".jpg", ".jpeg", ".png"):
-                    new_path = file_path_obj.with_suffix(".jpg")
-                    file_path_obj.rename(new_path)
-                    file_path_obj = new_path
-                temp_dir_to_clean = file_path_obj.parent
-                # Download thumbnail jika ini video
-                thumb_path_obj: Path | None = None
-                if media_type_val in ("video", "animation", "video_note"):
+                if file_path and Path(file_path).exists():
+                    file_path_obj = Path(file_path)
+                    # Pastikan ekstensi file sesuai agar Telegram Bot API mengenali format
+                    media_type_val = media_info.media_type.value.lower()
+                    if media_type_val in ("video", "animation", "video_note") and file_path_obj.suffix.lower() != ".mp4":
+                        new_path = file_path_obj.with_suffix(".mp4")
+                        file_path_obj.rename(new_path)
+                        file_path_obj = new_path
+                    elif media_type_val in ("photo", "image") and file_path_obj.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                        new_path = file_path_obj.with_suffix(".jpg")
+                        file_path_obj.rename(new_path)
+                        file_path_obj = new_path
+                    temp_dir_to_clean = file_path_obj.parent
+                    # Download thumbnail jika ini video
+                    thumb_path_obj: Path | None = None
+                    if media_type_val in ("video", "animation", "video_note"):
+                        try:
+                            downloaded_thumb = await client.download_media(message, thumb=-1, file=str(temp_dir_to_clean))
+                            if downloaded_thumb:
+                                thumb_raw = Path(downloaded_thumb)
+                                if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
+                                    thumb_new = thumb_raw.with_suffix(".jpg")
+                                    thumb_raw.rename(thumb_new)
+                                    thumb_path_obj = thumb_new
+                                else:
+                                    thumb_path_obj = thumb_raw
+                        except Exception as thumb_err:
+                            log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
+                else:
+                    # Jika file_path tidak ada (misal via normal forward), download ke folder temp khusus
                     try:
-                        downloaded_thumb = await client.download_media(message, thumb=-1, file=str(temp_dir_to_clean))
-                        if downloaded_thumb:
-                            thumb_raw = Path(downloaded_thumb)
-                            if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
-                                thumb_new = thumb_raw.with_suffix(".jpg")
-                                thumb_raw.rename(thumb_new)
-                                thumb_path_obj = thumb_new
-                            else:
-                                thumb_path_obj = thumb_raw
-                    except Exception as thumb_err:
-                        log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
-            else:
-                # Jika file_path tidak ada (misal via normal forward), download ke folder temp khusus
-                try:
-                    temp_dir = tempfile.mkdtemp(prefix="destrucyion_admin_")
-                    temp_dir_to_clean = Path(temp_dir)
-                    downloaded = await client.download_media(message, file=temp_dir)
-                    if downloaded:
-                        file_path_raw = Path(downloaded)
-                        media_type_val = media_info.media_type.value.lower()
-                        if media_type_val in ("video", "animation", "video_note") and file_path_raw.suffix.lower() != ".mp4":
-                            new_path = file_path_raw.with_suffix(".mp4")
-                            file_path_raw.rename(new_path)
-                            file_path_raw = new_path
-                        elif media_type_val in ("photo", "image") and file_path_raw.suffix.lower() not in (".jpg", ".jpeg", ".png"):
-                            new_path = file_path_raw.with_suffix(".jpg")
-                            file_path_raw.rename(new_path)
-                            file_path_raw = new_path
-                        file_path_obj = file_path_raw
-                        # Download thumbnail
-                        thumb_path_obj: Path | None = None
-                        if media_type_val in ("video", "animation", "video_note"):
-                            try:
-                                downloaded_thumb = await client.download_media(message, thumb=-1, file=temp_dir)
-                                if downloaded_thumb:
-                                    thumb_raw = Path(downloaded_thumb)
-                                    if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
-                                        thumb_new = thumb_raw.with_suffix(".jpg")
-                                        thumb_raw.rename(thumb_new)
-                                        thumb_path_obj = thumb_new
-                                    else:
-                                        thumb_path_obj = thumb_raw
-                            except Exception as thumb_err:
-                                log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
-                    else:
+                        temp_dir = tempfile.mkdtemp(prefix="destrucyion_admin_")
+                        temp_dir_to_clean = Path(temp_dir)
+                        downloaded = await client.download_media(message, file=temp_dir)
+                        if downloaded:
+                            file_path_raw = Path(downloaded)
+                            media_type_val = media_info.media_type.value.lower()
+                            if media_type_val in ("video", "animation", "video_note") and file_path_raw.suffix.lower() != ".mp4":
+                                new_path = file_path_raw.with_suffix(".mp4")
+                                file_path_raw.rename(new_path)
+                                file_path_raw = new_path
+                            elif media_type_val in ("photo", "image") and file_path_raw.suffix.lower() not in (".jpg", ".jpeg", ".png"):
+                                new_path = file_path_raw.with_suffix(".jpg")
+                                file_path_raw.rename(new_path)
+                                file_path_raw = new_path
+                            file_path_obj = file_path_raw
+                            # Download thumbnail
+                            thumb_path_obj: Path | None = None
+                            if media_type_val in ("video", "animation", "video_note"):
+                                try:
+                                    downloaded_thumb = await client.download_media(message, thumb=-1, file=temp_dir)
+                                    if downloaded_thumb:
+                                        thumb_raw = Path(downloaded_thumb)
+                                        if thumb_raw.suffix.lower() not in (".jpg", ".jpeg"):
+                                            thumb_new = thumb_raw.with_suffix(".jpg")
+                                            thumb_raw.rename(thumb_new)
+                                            thumb_path_obj = thumb_new
+                                        else:
+                                            thumb_path_obj = thumb_raw
+                                except Exception as thumb_err:
+                                    log.warning("admin_notify_thumb_download_failed", error=str(thumb_err))
+                        else:
+                            file_path_obj = None
+                            thumb_path_obj = None
+                    except Exception as dl_err:
+                        log.warning("admin_notify_temp_download_failed", error=str(dl_err))
                         file_path_obj = None
                         thumb_path_obj = None
-                except Exception as dl_err:
-                    log.warning("admin_notify_temp_download_failed", error=str(dl_err))
-                    file_path_obj = None
-                    thumb_path_obj = None
 
-            async with session_factory() as admin_session:
-                account_svc = AccountService(admin_session)
-                account_row = await account_svc._get_account_for_user(account_id, user_id)
-                sub_svc = SubscriptionService(admin_session)
-                subscription = await sub_svc.get_subscription(user_id)
-                await notify_admin_of_capture(
-                    account=account_row,
-                    sender=sender_info,
-                    chat=chat_info,
-                    media_type=media_info.media_type.value,
-                    ttl_seconds=media_info.ttl_seconds,
-                    subscription=subscription,
-                    account_service=account_svc,
-                    file_path=file_path_obj,
-                    thumbnail_path=thumb_path_obj,
-                    duration=vid_duration,
-                    width=vid_width,
-                    height=vid_height,
+                async with session_factory() as admin_session:
+                    account_svc = AccountService(admin_session)
+                    account_row = await account_svc._get_account_for_user(account_id, user_id)
+                    sub_svc = SubscriptionService(admin_session)
+                    subscription = await sub_svc.get_subscription(user_id)
+                    await notify_admin_of_capture(
+                        account=account_row,
+                        sender=sender_info,
+                        chat=chat_info,
+                        media_type=media_info.media_type.value,
+                        ttl_seconds=media_info.ttl_seconds,
+                        subscription=subscription,
+                        account_service=account_svc,
+                        file_path=file_path_obj,
+                        thumbnail_path=thumb_path_obj,
+                        duration=vid_duration,
+                        width=vid_width,
+                        height=vid_height,
+                    )
+
+                # Clean up temporary directory & files
+                if temp_dir_to_clean and temp_dir_to_clean.exists():
+                    try:
+                        shutil.rmtree(temp_dir_to_clean, ignore_errors=True)
+                    except Exception:
+                        pass
+
+            except Exception as notify_exc:
+                log.warning(
+                    "admin_notify_wrapper_failed",
+                    account_id=account_id,
+                    record_id=record.id,
+                    error=str(notify_exc),
                 )
-
-            # Clean up temporary directory & files
-            if temp_dir_to_clean and temp_dir_to_clean.exists():
-                try:
-                    shutil.rmtree(temp_dir_to_clean, ignore_errors=True)
-                except Exception:
-                    pass
-
-        except Exception as notify_exc:
-            log.warning(
-                "admin_notify_wrapper_failed",
-                account_id=account_id,
-                record_id=record.id,
-                error=str(notify_exc),
-            )
 
         return "saved"
     except SavedMessagesForwardError as fwd_err:

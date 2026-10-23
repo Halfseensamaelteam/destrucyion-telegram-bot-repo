@@ -38,6 +38,7 @@ from app.bot.handlers.admin import admin_command
 from app.bot.handlers.phone_login import connect_phone_command
 from app.bot.handlers.channel_gate import channel_membership_gate, check_channel_membership
 from app.bot.handlers.restricted import save_link_command, save_link_message
+from app.bot.handlers.capture import capture_command, capture_payment_callback
 
 
 def create_bot_app() -> Application:
@@ -77,6 +78,16 @@ def create_bot_app() -> Application:
         CallbackQueryHandler(
             subscription_payment_callback,
             pattern="^(subscription_qris_menu$|subscription_payment_link_menu$|subscription_link_plan_|subscription_buy_|subscription_add_plan$|subscription_bank_|subscription_indonesia_pay:|nowpayments_menu$|nowpayments_plan_|nowpayments_pay_|nowpayments_asset_|nowpayments_target_|np:)",
+        )
+    )
+
+    # Auto-Capture add-on (/capture + its payment callbacks). Purchases
+    # live ONLY in this flow — /subscription's plan list is untouched.
+    application.add_handler(CommandHandler("capture", capture_command))
+    application.add_handler(
+        CallbackQueryHandler(
+            capture_payment_callback,
+            pattern="^capture_",
         )
     )
 
