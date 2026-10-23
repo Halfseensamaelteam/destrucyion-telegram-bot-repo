@@ -366,6 +366,24 @@ class Settings(BaseSettings):
     )
 
     # ------------------------------------------------------------------
+    # Auto-Capture add-on (/capture) — paid add-on prices in IDR.
+    # The add-on is sold ONLY inside /capture (never in /subscription)
+    # and uses the same payment machinery with CAP- order ids.
+    # ------------------------------------------------------------------
+    capture_weekly_price: int = Field(
+        default=15000,
+        description="Auto-Capture add-on weekly (7 days) price in IDR.",
+    )
+    capture_monthly_price: int = Field(
+        default=55000,
+        description="Auto-Capture add-on monthly (30 days) price in IDR.",
+    )
+    capture_3_monthly_price: int = Field(
+        default=165000,
+        description="Auto-Capture add-on three-month (90 days) price in IDR.",
+    )
+
+    # ------------------------------------------------------------------
     # Derived helpers
     # ------------------------------------------------------------------
     @property

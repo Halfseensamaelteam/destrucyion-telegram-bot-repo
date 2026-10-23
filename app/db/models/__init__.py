@@ -13,6 +13,7 @@ from app.db.models.user import User
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.nowpayments_payment import NOWPaymentsPayment
 from app.db.models.link_request import LinkRequest, LinkRequestStatus
+from app.db.models.capture import CaptureChannel, CaptureSubscription
 
 __all__ = [
     "Base",
