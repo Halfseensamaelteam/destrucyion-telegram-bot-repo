@@ -6,9 +6,11 @@ Payment service for Midtrans transactions.
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models.capture import CaptureSubscription
 from app.db.models.payment import Payment, PaymentStatus
 from app.db.models.subscription import Subscription, SubscriptionPlan
 from app.db.repositories.payment_repo import PaymentRepository
+from app.services.capture_addon import CaptureAddonService
 from app.services.midtrans import MidtransService
 from app.services.subscription import SubscriptionService
 
@@ -21,6 +23,7 @@ class PaymentService:
         self.payment_repo = PaymentRepository(session)
         self.midtrans = MidtransService()
         self.subscription_service = SubscriptionService(session)
+        self.capture_service = CaptureAddonService(session)
 
     async def create_qris_payment(
         self,
@@ -130,14 +133,131 @@ class PaymentService:
 
         return payment, transaction
 
+    # ------------------------------------------------------------------
+    # Auto-Capture add-on purchases — same persistence + webhook flow as
+    # subscriptions, but CAP- order ids and add-on activation on settle.
+    # ------------------------------------------------------------------
+    async def create_capture_qris_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> Payment:
+        """Create a Midtrans QRIS transaction for the capture add-on."""
+
+        transaction = self.midtrans.create_capture_qris_transaction(
+            user_id=user_id,
+            plan=plan,
+        )
+
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=transaction["transaction_id"],
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=transaction["qr_string"],
+            expiry_time=transaction["expiry_time"],
+        )
+
+        return payment
+
+    async def create_capture_payment_link_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> tuple[Payment, dict]:
+        """Create a hosted Midtrans Payment Link for the capture add-on."""
+        transaction = self.midtrans.create_capture_payment_link_transaction(
+            user_id=user_id,
+            plan=plan,
+        )
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=None,
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=None,
+            expiry_time=transaction["expiry_time"],
+        )
+        return payment, transaction
+
+    async def create_capture_bank_transfer_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+        bank: str,
+    ) -> tuple[Payment, dict]:
+        """Create and persist a capture add-on Virtual Account payment."""
+
+        transaction = self.midtrans.create_capture_bank_transfer_transaction(
+            user_id=user_id,
+            plan=plan,
+            bank=bank,
+        )
+
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=transaction["transaction_id"],
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=None,
+            expiry_time=transaction["expiry_time"],
+        )
+
+        return payment, transaction
+
+    async def create_capture_mandiri_bill_payment(
+        self,
+        *,
+        user_id: int,
+        plan: SubscriptionPlan,
+    ) -> tuple[Payment, dict]:
+        """Create and persist a capture add-on Mandiri E-Channel payment."""
+
+        transaction = self.midtrans.create_capture_mandiri_bill_transaction(
+            user_id=user_id,
+            plan=plan,
+        )
+
+        payment = await self.payment_repo.create(
+            user_id=user_id,
+            order_id=transaction["order_id"],
+            transaction_id=transaction["transaction_id"],
+            plan=transaction["plan"],
+            amount=transaction["amount"],
+            currency=transaction["currency"],
+            status=PaymentStatus.PENDING,
+            qr_string=None,
+            expiry_time=transaction["expiry_time"],
+        )
+
+        return payment, transaction
+
     async def process_notification(
         self,
         *,
         order_id: str,
         transaction_id: str | None,
         status: PaymentStatus,
-    ) -> tuple[Payment, Subscription | None]:
-        """Process a verified Midtrans payment notification."""
+    ) -> tuple[Payment, Subscription | CaptureSubscription | None]:
+        """Process a verified Midtrans payment notification.
+
+        On first settlement, the granted product depends on the order id:
+        CAP- orders activate the Auto-Capture add-on; all other orders
+        activate a base subscription, exactly as before. Returns the
+        granted record (Subscription or CaptureSubscription) or None.
+        """
 
         payment = await self.payment_repo.get_by_order_id(order_id)
 
@@ -155,7 +275,7 @@ class PaymentService:
             )
 
         previous_status = payment.status
-        subscription = None
+        granted: Subscription | CaptureSubscription | None = None
 
         await self.payment_repo.update_transaction(
             payment,
@@ -169,9 +289,16 @@ class PaymentService:
         ):
             plan = SubscriptionPlan(payment.plan)
 
-            subscription = await self.subscription_service.grant_subscription(
-                user_id=payment.user_id,
-                plan=plan,
-            )
+            if payment.order_id.startswith("CAP-"):
+                granted = await self.capture_service.grant_capture_addon(
+                    user_id=payment.user_id,
+                    plan=plan,
+                    order_id=payment.order_id,
+                )
+            else:
+                granted = await self.subscription_service.grant_subscription(
+                    user_id=payment.user_id,
+                    plan=plan,
+                )
 
-        return payment, subscription
+        return payment, granted

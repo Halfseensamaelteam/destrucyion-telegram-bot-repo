@@ -11,6 +11,7 @@ from app.db.models.subscription import SubscriptionPlan
 from app.db.repositories.nowpayments_payment_repo import NOWPaymentsPaymentRepository
 from app.db.repositories.user_repo import UserRepository
 from app.db.session import _get_session_factory
+from app.services.capture_addon import CaptureAddonService
 from app.services.nowpayments import NOWPaymentsService
 from app.services.subscription import SubscriptionService
 from app.services.telegram_notifier import TelegramNotifier
@@ -67,6 +68,7 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
     notify_user_id: int | None = None
     notify_plan: str | None = None
     notify_expiry = None
+    notify_is_capture = False
     async with factory() as session:
         repository = NOWPaymentsPaymentRepository(session)
         payment = await repository.get_by_order_id(order_id, for_update=True)
@@ -113,19 +115,36 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
             payment.payment_status = status
 
         if status == "finished" and not already_activated:
+            # NPC- orders are Auto-Capture add-on purchases: their stored
+            # plan carries a "capture_" prefix and they activate the
+            # add-on entitlement, never a base subscription.
+            is_capture_order = payment.order_id.startswith("NPC-")
             try:
-                plan = SubscriptionPlan(payment.plan)
+                stored_plan = (
+                    payment.plan.removeprefix("capture_")
+                    if is_capture_order
+                    else payment.plan
+                )
+                plan = SubscriptionPlan(stored_plan)
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Stored subscription plan is invalid.") from exc
 
-            subscription = await SubscriptionService(session).grant_subscription(
-                user_id=payment.user_id,
-                plan=plan,
-            )
+            if is_capture_order:
+                granted = await CaptureAddonService(session).grant_capture_addon(
+                    user_id=payment.user_id,
+                    plan=plan,
+                    order_id=payment.order_id,
+                )
+            else:
+                granted = await SubscriptionService(session).grant_subscription(
+                    user_id=payment.user_id,
+                    plan=plan,
+                )
             payment.activated_at = datetime.now(timezone.utc)
             payment.payment_status = "finished"
             notify_plan = plan.value
-            notify_expiry = subscription.expires_at
+            notify_expiry = granted.expires_at
+            notify_is_capture = is_capture_order
             user = await UserRepository(session).get_by_id(payment.user_id)
             notify_user_id = user.telegram_user_id if user is not None else None
 
@@ -135,11 +154,19 @@ async def nowpayments_notification(request: Request) -> dict[str, object]:
     # must not roll back or duplicate the subscription grant on provider retry.
     if notify_user_id is not None and notify_plan is not None:
         try:
-            await TelegramNotifier().send_subscription_activated(
-                telegram_user_id=notify_user_id,
-                plan=notify_plan,
-                expires_at=notify_expiry,
-            )
+            notifier = TelegramNotifier()
+            if notify_is_capture:
+                await notifier.send_capture_activated(
+                    telegram_user_id=notify_user_id,
+                    plan=notify_plan,
+                    expires_at=notify_expiry,
+                )
+            else:
+                await notifier.send_subscription_activated(
+                    telegram_user_id=notify_user_id,
+                    plan=notify_plan,
+                    expires_at=notify_expiry,
+                )
         except Exception:
             log.exception("NOWPayments subscription notification failed", extra={"order_id": order_id})
 

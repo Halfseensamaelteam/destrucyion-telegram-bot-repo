@@ -143,11 +143,21 @@ async def midtrans_notification(request: Request) -> dict:
             if user is not None:
                 notifier = TelegramNotifier()
 
-                await notifier.send_subscription_activated(
-                    telegram_user_id=user.telegram_user_id,
-                    plan=payment.plan,
-                    expires_at=subscription.expires_at,
-                )
+                if payment.order_id.startswith("CAP-"):
+                    # Capture add-on order (granted record is a
+                    # CaptureSubscription): confirm the add-on, not a
+                    # base subscription.
+                    await notifier.send_capture_activated(
+                        telegram_user_id=user.telegram_user_id,
+                        plan=payment.plan,
+                        expires_at=subscription.expires_at,
+                    )
+                else:
+                    await notifier.send_subscription_activated(
+                        telegram_user_id=user.telegram_user_id,
+                        plan=payment.plan,
+                        expires_at=subscription.expires_at,
+                    )
 
         return {
             "status": "ok",

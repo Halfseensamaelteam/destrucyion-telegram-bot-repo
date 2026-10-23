@@ -71,3 +71,43 @@ class TelegramNotifier:
             text=text,
             parse_mode="Markdown",
         )
+
+    async def send_capture_activated(
+        self,
+        *,
+        telegram_user_id: int,
+        plan: str,
+        expires_at: object | None,
+    ) -> None:
+        """Notify a user that their Auto-Capture add-on has been activated.
+
+        English copy, matching the rest of the /capture flow.
+        """
+
+        if expires_at is None:
+            expires_line = "Expires: Never"
+        else:
+            wib = timezone(timedelta(hours=7))
+            expires_wib = expires_at.astimezone(wib)
+
+            expires_line = (
+                f"Expires: "
+                f"{expires_wib.strftime('%Y-%m-%d %H:%M WIB')}"
+            )
+
+        text = (
+            "*Auto-Capture Add-on Activated!*\n\n"
+            "Your payment has been confirmed. Thank you!\n\n"
+            f"*Plan:* {plan.title()}\n"
+            "*Payment:* Paid\n"
+            f"{expires_line}\n\n"
+            "The add-on is now active. Register your channel with "
+            "/capture add <channel_id> and protected photos & videos "
+            "from it will be saved automatically."
+        )
+
+        await self._bot.send_message(
+            chat_id=telegram_user_id,
+            text=text,
+            parse_mode="Markdown",
+        )
