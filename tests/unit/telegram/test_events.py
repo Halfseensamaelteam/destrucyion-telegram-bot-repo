@@ -412,6 +412,9 @@ async def test_process_message_cleans_up_temp_dir(tmp_path):
     dummy_thumb.write_bytes(b"thumb content")
 
     mock_msg = MagicMock()
+    # Private (DM) capture: the admin-notify mirror only fires for
+    # private user chats (channels/groups are never mirrored).
+    mock_msg.is_private = True
     mock_manager = MagicMock()
     mock_client = AsyncMock()
     mock_manager.get_client.return_value = mock_client
