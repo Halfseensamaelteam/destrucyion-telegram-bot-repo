@@ -98,6 +98,21 @@ services:
       - bot_state:/app/data
     entrypoint: ["docker-entrypoint.sh"]
 
+  # Cloudflare Tunnel, token mode: no config.yml, no credentials JSON,
+  # nothing to download or install by hand — compose pulls the
+  # cloudflared image itself and the tunnel authenticates with a token.
+  # One-time setup in the Cloudflare dashboard (Zero Trust -> Networks
+  # -> Tunnels -> Create a tunnel), point its public hostname route at
+  # http://api:8000 there, then put the token in .env as
+  # CLOUDFLARE_TUNNEL_TOKEN. While the token is missing, compose stops
+  # with a clear error instead of starting a dead tunnel.
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: ["tunnel", "run", "--token", "${CLOUDFLARE_TUNNEL_TOKEN:?CLOUDFLARE_TUNNEL_TOKEN is not set in .env}"]
+    depends_on:
+      - api
+
 volumes:
   postgres_data:
   redis_data:

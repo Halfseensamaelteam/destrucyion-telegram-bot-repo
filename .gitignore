@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.cloudflared/
 *.session
 *.session-journal
 sessions/
