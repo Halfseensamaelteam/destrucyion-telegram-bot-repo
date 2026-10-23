@@ -93,6 +93,10 @@ arrival is the only reliable moment.
 | `LINK_REQUEST_POLL_SECONDS` | `3` | Worker queue poll interval |
 | `LINK_REQUEST_MAX_CONCURRENCY` | `10` | Link requests processed at once (max 1 per account) |
 | `LINK_REQUEST_STALE_SECONDS` | `600` | A claimed request older than this is requeued as abandoned |
+| `LINK_REQUEST_DISK_RESERVE_MB` | `3072` | Temp disk that must always stay free; `0` disables size-aware disk admission |
+| `LINK_REQUEST_BIG_FILE_MB` | `100` | A request whose total media size exceeds this is big class |
+| `LINK_REQUEST_BIG_POOL_PERCENT` | `30` | Big class may lease at most this % of usable disk |
+| `LINK_REQUEST_BIG_GUARANTEE_PERCENT` | `15` | % of usable fenced off from small leases for the big class |
 
 ## Concurrency & multiple workers
 
@@ -136,12 +140,91 @@ reserve per slot, recomputed every cycle), because RAM alone cannot
 see the disk filling up. A cap of `0` without a budget falls back to
 the fixed default of 10 rather than running unguarded.
 
+### Size-aware disk admission (two-class byte leases)
+
+The slot cap and the RAM budget count REQUESTS and MEMORY — neither
+can see the disk. One hundred 10 MB saves and one hundred 900 MB
+saves are the same "100 slots", but 1 GB vs 90 GB of temp files (each
+transfer holds exactly 1× its file size: the downloader preallocates
+the temp file). So before a request downloads anything, it leases its
+total size in BYTES (`app/core/disk_lease.py`):
+
+1. The processor fetches the request's messages first (the same
+   per-id RPCs, all up front). A message's download size is known
+   before any byte moves — `message.file.size` — and only posts that
+   will actually download count: timed or protected (noforwards)
+   posts. Everything else is a server-side forward and leases 0.
+   (A download-path post whose size Telegram does not report is
+   accounted at the big-file threshold and treated as big class.)
+2. The lease is granted only while the invariant holds:
+   `free disk − all active leases − this size ≥ LINK_REQUEST_DISK_RESERVE_MB`
+   (default 3072), with free space re-measured at every decision.
+   Otherwise the request waits asynchronously; it is never dropped.
+3. The lease is released when the request finishes, fails, or is
+   cancelled. The slot cap and the RAM brake above still apply —
+   leases compose with them, they do not replace them.
+
+Requests split into two classes by TOTAL size
+(`LINK_REQUEST_BIG_FILE_MB`, default 100 MB):
+
+- **Small** requests lease against nearly the whole usable disk
+  (free − reserve), so a flood of small files drains at full speed
+  and finishes first.
+- **Big** requests lease against a pool capped at
+  `LINK_REQUEST_BIG_POOL_PERCENT` (default 30%) of usable — a flood
+  of huge videos can only ever hold that share. They keep moving,
+  just fewer at a time, and cannot crowd the small class off the
+  disk. One exception: a single big file bigger than the whole pool
+  is still admitted on an otherwise idle disk — the cap never drops
+  below one file's own size.
+- Symmetrically, `LINK_REQUEST_BIG_GUARANTEE_PERCENT` (default 15%)
+  of usable is fenced off from small leases, so the big class always
+  has room to start even mid-flood. Nobody starves in either
+  direction. When space frees, waiting small leases are served before
+  waiting big ones; a waiter that still does not fit never blocks the
+  other class behind it.
+
+Edge cases, deliberately: a file larger than the whole usable budget
+may run SOLO once nothing else is leased, provided it fits the disk
+with 1 GB to spare; a file that cannot fit even an empty disk FAILS
+fast with the reason recorded on the row (operator frees space)
+instead of waiting forever. Note the corollary: disk admission
+assumes the host keeps at least the reserve plus ~1 GB free — on a
+disk already fuller than that, download saves fail fast rather than
+becoming the thing that fills the disk. Set
+`LINK_REQUEST_DISK_RESERVE_MB=0` to disable the whole mechanism
+(behaviour is then identical to before it existed).
+
+Worked example — the production shape this was built for: 400 users
+saving 10–80 MB videos plus 100 users saving 300–900 MB videos, on a
+disk with 22 GB free and the default 3 GB reserve (19 GB usable).
+Small leases can use 19 GB minus the 2.9 GB guarantee ≈ 16 GB, so the
+small class runs at the full 200 slot cap (≈200 × ≤80 MB) and drains
+first. The big pool is 30% × 19 GB ≈ 5.7 GB, so roughly 6–19 big
+videos (at 900 MB / 300 MB) transfer at any moment — continuously,
+never zero, because the 2.9 GB guarantee is fenced off from the small
+flood — while the remaining big requests wait their turn. Free disk
+never drops below the 3 GB reserve no matter how the two floods mix.
+`scripts/load_test_link_queue.py` reproduces this exact scenario
+against a simulated disk (see its `--small-accounts` / `--big-accounts`
+flags) and asserts all of the invariants above.
+
+One behavioural note: because the lease needs the request's TOTAL
+size, the processor now fetches all of a range's messages before the
+first download. A fetch error mid-range therefore aborts the request
+before any item is saved (previously the earlier items were already
+saved when the error hit; the request was marked FAILED either way,
+and fetch errors are normally chat-level, hitting on the first id).
+
 ## Implementation map
 
 - `app/telegram/link_parser.py` — pure parser (public / `/c/` / topic /
   `/b/` / range / invite; converts `/c/<id>` to the `-100<id>` peer id).
 - `app/services/restricted.py` — fetch-by-id on the owner's client, invite
   join, and `LinkRequestProcessor` (worker-side queue drainer).
+- `app/core/disk_lease.py` — size-aware two-class byte leases over the
+  temp disk (reserve + big pool + big guarantee), held per request
+  between fetch and download.
 - `app/telegram/events.py` — `.get` Saved-Messages handler + protected
   auto-capture; saving itself reuses `_process_message` (capture record,
   idempotency, admin notify).
