@@ -18,8 +18,14 @@ their own queues independently, so at any moment one user may be
 downloading 180 MB while another finishes a 30 MB one.
 
 Display: a live terminal dashboard (account wall + per-transfer
-progress bars) when stdout is a TTY; plain periodic summary lines
-otherwise (e.g. docker logs). --no-live forces the plain mode.
+progress bars). Classic runs show it when stdout is a TTY, with
+plain periodic summary lines otherwise (e.g. docker logs).
+Mixed-size runs show the dashboard BY DEFAULT even without a TTY —
+it carries the virtual-disk panel and the per-class counters, and
+the usual docker compose run invocation has no TTY, which would
+otherwise silently degrade the scenario's whole point to plain
+lines. --no-live forces the plain mode; --live forces the
+dashboard in classic mode too.
 
 What this proves: queue/claim/concurrency behaviour and throughput of
 OUR code at --accounts scale. What it cannot prove: real Telegram
@@ -521,15 +527,30 @@ def _symbol(st: AccountState) -> str:
 
 
 def _render(states: list[AccountState], stats: Stats, *, started: float,
-            total_requests: int, db_counts: dict, view: dict | None = None) -> str:
+            total_requests: int, db_counts: dict, view: dict | None = None,
+            disk: dict | None = None) -> str:
+    # Mixed mode (a disk panel dict is passed) adds a CLASS column,
+    # the virtual-disk panel and per-class counters. Classic mode
+    # must render byte-identically to before, so every addition is
+    # gated on `mixed` and the frame width is derived from the
+    # column table — which is exactly 95 for the classic columns.
+    mixed = disk is not None
+    columns = [("USER", 9), ("STATUS", 10), ("SIZE", 11),
+               ("PROCESS", 25), ("SPEED", 11), ("SAVED", 8)]
+    bar_width = 16
+    if mixed:
+        columns = [("USER", 9), ("CLASS", 5), ("STATUS", 10), ("SIZE", 11),
+                   ("PROCESS", 22), ("SPEED", 11), ("SAVED", 8)]
+        bar_width = 13  # narrower PROCESS column — shrink the bar to fit
+    frame_w = sum(w + 2 for _, w in columns) + len(columns) + 3
     now = time.monotonic()
     elapsed = now - started
     done_n = sum(s.done for s in states)
     failed_n = sum(s.failed for s in states)
     lines = []
-    lines.append("=" * 95)
+    lines.append("=" * frame_w)
     lines.append("  DESTRUCYION — LOAD TEST MONITOR (fake clients, pipeline asli)")
-    lines.append("=" * 95)
+    lines.append("=" * frame_w)
     lines.append(
         f"  elapsed {elapsed:7.1f}s    selesai {done_n}/{total_requests}    "
         f"gagal {failed_n}    antrean: pending {db_counts.get('pending', '?')}  "
@@ -541,21 +562,51 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         f"stream aktif {stats.active_streams} (max {stats.max_streams})   "
         f"upload aktif {stats.active_uploads} (max {stats.max_uploads})"
     )
-    lines.append("-" * 95)
+    if mixed:
+        vdisk = disk["vdisk"]
+        leases = disk["leases"]
+        free_now = vdisk.free_mb()
+        total_disk = vdisk.base_free_mb
+        leased = leases.total_leased_mb
+        big_leased = leases.big_leased_mb
+        small_leased = max(0.0, leased - big_leased)
+        free_bar = _bar(int(free_now), max(1, int(total_disk)), 40)
+        lines.append("-" * frame_w)
+        lines.append(
+            f"  DISK VIRTUAL — total {total_disk:.0f} MB   "
+            f"bebas {free_now:.0f} MB   reserve {leases.reserve_mb:.0f} MB"
+        )
+        lines.append(
+            f"  lease aktif {leased:.0f} MB   kecil {small_leased:.0f} MB   "
+            f"besar {big_leased:.0f} MB   antre lease {leases.waiting_count}"
+        )
+        lines.append(
+            f"  bebas [{free_bar}] "
+            f"{100.0 * free_now / max(total_disk, 1.0):.0f}% dari total — "
+            f"tidak boleh di bawah reserve"
+        )
+        cls_parts = []
+        for group_name, label in (("small", "KECIL"), ("big", "BESAR")):
+            cls = [s for s in states if s.group == group_name]
+            cls_parts.append(
+                f"kelas {label}: selesai {sum(s.done for s in cls)}/"
+                f"{sum(s.planned for s in cls)}  "
+                f"aktif {sum(1 for s in cls if s.phase in ('DOWN', 'UP'))}"
+            )
+        lines.append("  " + "      ".join(cls_parts))
+    lines.append("-" * frame_w)
     lines.append("  PETA USER:  [v] selesai   [D] download   [U] upload   [.] menunggu   [x] gagal")
     wall = [_symbol(s).replace("✓", "v").replace("✗", "x") for s in states]
     for i in range(0, len(wall), 50):
         lines.append("  " + " ".join(wall[i:i + 50]))
-    lines.append("-" * 95)
+    lines.append("-" * frame_w)
 
     # Full user table in a scrollable viewport. Default mode follows
     # the action (viewport sits on the page with active transfers);
     # any arrow key switches to manual scrolling and the view stays
     # exactly where the user put it — nothing auto-rotates.
     # Border, header and rows are all built from ONE column-width
-    # table, so the pipes always line up.
-    columns = [("USER", 9), ("STATUS", 10), ("SIZE", 11),
-               ("PROCESS", 25), ("SPEED", 11), ("SAVED", 8)]
+    # table (defined above), so the pipes always line up.
 
     def _row(cells: list[str]) -> str:
         return "  |" + "|".join(
@@ -596,26 +647,31 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
         status = _status(s)
         if status == "DONE":
             pct = 100.0
-            bar = _bar(1, 1)
+            bar = _bar(1, 1, bar_width)
         elif status in ("DOWNLOAD", "UPLOAD") and s.current_total:
             shown = min(s.current_done, s.current_total)
             pct = 100 * shown / s.current_total
-            bar = _bar(shown, s.current_total)
+            bar = _bar(shown, s.current_total, bar_width)
         else:
             pct = 0.0
-            bar = _bar(0, 1)
+            bar = _bar(0, 1, bar_width)
         size_mb = s.current_total / MB if s.current_total else 0.0
         speed = f"{s.rate_bps / MB:.1f} MB/s" if status in ("DOWNLOAD", "UPLOAD") else "-"
-        lines.append(_row([
+        cells = [
             f"user-{s.label:03d}",
             status,
             f"{size_mb:6.1f} MB",
             f"[{bar}] {pct:5.1f}%",
             speed,
             f"{s.done}/{s.planned}",
-        ]))
+        ]
+        if mixed:
+            cells.insert(
+                1, {"small": "KECIL", "big": "BESAR"}.get(s.group, "-")
+            )
+        lines.append(_row(cells))
     lines.append(border)
-    lines.append("=" * 95)
+    lines.append("=" * frame_w)
     lines.append(
         "  [↑]/[↓] geser 1 baris   [PgUp]/[PgDn] geser 1 halaman   "
         "[f] ikuti aktif   [q] / Ctrl+C berhenti (laporan tetap dicetak)"
@@ -624,7 +680,8 @@ def _render(states: list[AccountState], stats: Stats, *, started: float,
 
 
 async def _dashboard(states, stats, *, started, total_requests, live: bool,
-                     db_counts: dict, stop: asyncio.Event, on_quit=None) -> None:
+                     db_counts: dict, stop: asyncio.Event, on_quit=None,
+                     disk: dict | None = None) -> None:
     if live:
         view = {"offset": 0, "follow": True}
         # Keyboard control: raw-mode stdin, arrow keys scroll the table
@@ -694,7 +751,7 @@ async def _dashboard(states, stats, *, started, total_requests, live: bool,
             while not stop.is_set():
                 frame = _render(states, stats, started=started,
                                 total_requests=total_requests,
-                                db_counts=db_counts, view=view)
+                                db_counts=db_counts, view=view, disk=disk)
                 sys.stdout.write("\033[H\033[2J" + frame + "\n")
                 sys.stdout.flush()
                 await asyncio.sleep(0.5)
@@ -711,11 +768,28 @@ async def _dashboard(states, stats, *, started, total_requests, live: bool,
             done_n = sum(s.done for s in states)
             failed_n = sum(s.failed for s in states)
             elapsed = time.monotonic() - started
+            extra = ""
+            if disk is not None:
+                small_states = [s for s in states if s.group == "small"]
+                big_states = [s for s in states if s.group == "big"]
+                leases = disk["leases"]
+                extra = (
+                    f" disk bebas {disk['vdisk'].free_mb():.0f} MB "
+                    f"lease {leases.total_leased_mb:.0f} MB "
+                    f"(kecil "
+                    f"{leases.total_leased_mb - leases.big_leased_mb:.0f} MB, "
+                    f"besar {leases.big_leased_mb:.0f} MB) "
+                    f"kecil selesai {sum(s.done for s in small_states)}/"
+                    f"{sum(s.planned for s in small_states)} "
+                    f"besar selesai {sum(s.done for s in big_states)}/"
+                    f"{sum(s.planned for s in big_states)}"
+                )
             print(
                 f"[{elapsed:7.1f}s] done {done_n}/{total_requests} failed {failed_n} "
                 f"pending {db_counts.get('pending', '?')} "
                 f"↓ {stats.bytes_down / MB:.0f} MB ↑ {stats.bytes_up / MB:.0f} MB "
-                f"streams {stats.active_streams} uploads {stats.active_uploads}",
+                f"streams {stats.active_streams} uploads {stats.active_uploads}"
+                f"{extra}",
                 flush=True,
             )
             await asyncio.sleep(5)
@@ -1029,7 +1103,24 @@ async def run(args: argparse.Namespace) -> int:
     db_counts: dict[str, int] = {"pending": total_requests, "processing": 0}
     stop = asyncio.Event()
     started = time.monotonic()
-    live = args.live or ((not args.no_live) and sys.stdout.isatty())
+    if mixed:
+        # Mixed runs get the dashboard BY DEFAULT, TTY or not: the
+        # disk panel and per-class counters are the point of the
+        # scenario, and the standard docker compose run invocation
+        # allocates no TTY — the classic isatty() rule silently
+        # degraded these runs to plain summary lines. --no-live is
+        # the only opt-out.
+        live = not args.no_live
+    else:
+        live = args.live or ((not args.no_live) and sys.stdout.isatty())
+    # Shared read-only view of the virtual disk + lease manager for
+    # the dashboard's DISK panel (mixed mode only), refreshed by
+    # reading the live objects at render time — same pattern as
+    # db_counts, but the objects ARE the state.
+    disk_panel = None
+    if mixed:
+        disk_panel = {"vdisk": vdisk, "leases": lease_manager,
+                      "reserve_mb": args.disk_reserve_mb}
     if live:
         print("DASHBOARD LIVE aktif — tampilan diperbarui tiap 0.5 detik "
               "selama test berjalan. Ctrl+C berhenti dengan aman dan "
@@ -1078,7 +1169,8 @@ async def run(args: argparse.Namespace) -> int:
     dash = asyncio.create_task(
         _dashboard(states, stats, started=started,
                    total_requests=total_requests, live=live,
-                   db_counts=db_counts, stop=stop, on_quit=_request_stop)
+                   db_counts=db_counts, stop=stop, on_quit=_request_stop,
+                   disk=disk_panel)
     )
 
     async def _refresh_counts() -> None:

@@ -103,7 +103,7 @@ mengatur benar-benar sewa disk-nya, bukan batas slot:
 ```bash
 docker compose run --rm -e LINK_REQUEST_MAX_CONCURRENCY=200 \
   --entrypoint python worker scripts/load_test_link_queue.py \
-  --confirm-scratch-db \
+  --confirm-scratch-db --live \
   --small-accounts 400 --small-file-min-mb 10 --small-file-max-mb 80 \
   --big-accounts 100 --big-file-min-mb 300 --big-file-max-mb 900 \
   --virtual-free-mb 22528 --disk-reserve-mb 3072 \
@@ -124,7 +124,11 @@ Catatan:
   diuji. Mau rasa waktu yang lebih realistis, turunkan lagi.
 - Dashboard live akan tampil (tombol `q` / Ctrl+C berhenti dengan aman
   dan laporan akhir tetap dicetak — hasil parsialnya ditandai
-  `PARTIAL`, bukan PASS).
+  `PARTIAL`, bukan PASS). Di skenario campuran dashboard ini tampil
+  secara default — lengkap dengan panel DISK VIRTUAL (sisa disk,
+  lease per kelas, garis reserve) dan kolom CLASS di tabel user;
+  `--live` di atas hanya penegasan. Smoke test di langkah sebelumnya
+  sengaja memakai `--no-live` karena cukup ringkasan teks.
 
 ## 5. Cara membaca hasil
 
