@@ -446,6 +446,273 @@ async def test_stale_processing_requests_are_reset(db_session, user, account):
     assert fresh.status == LinkRequestStatus.PENDING
 
 
+# ---------------------------------------------------------------------------
+# LinkRequestProcessor — size-aware disk admission (leases)
+# ---------------------------------------------------------------------------
+
+def _fake_video_message(size_bytes, msg_id=42):
+    """A protected video post on real Telethon TL types (mirrors the
+    load-test harness's FakeMessage): classify_message() sees a real
+    document, noforwards routes it to download+upload, and
+    message.file.size reports the size BEFORE any download."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from telethon.tl.types import (
+        Document,
+        DocumentAttributeFilename,
+        DocumentAttributeVideo,
+        MessageMediaDocument,
+    )
+
+    document = Document(
+        id=777001, access_hash=0, file_reference=b"",
+        date=datetime.now(timezone.utc), mime_type="video/mp4",
+        size=size_bytes, thumbs=[], dc_id=2,
+        attributes=[
+            DocumentAttributeVideo(duration=60, w=1280, h=720,
+                                   supports_streaming=True),
+            DocumentAttributeFilename(file_name="video.mp4"),
+        ],
+    )
+    msg = SimpleNamespace(
+        id=msg_id,
+        media=MessageMediaDocument(document=document, ttl_seconds=None),
+        message="caption",
+        noforwards=True,
+        document=document,
+    )
+    msg.file = SimpleNamespace(size=size_bytes, name="video.mp4", ext=".mp4")
+    return msg
+
+
+def _disk_processor(db_session, manager, process_message, *, free_mb, **over):
+    """A processor whose disk admission reads a test-controlled disk."""
+    from app.core.disk_lease import DiskLeaseManager
+
+    kwargs = dict(
+        reserve_mb=3072, big_file_mb=100,
+        big_pool_percent=30, big_guarantee_percent=15,
+    )
+    kwargs.update(over)
+    lease_manager = DiskLeaseManager(
+        free_mb_reader=lambda: free_mb, **kwargs
+    )
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(
+        factory, manager,
+        process_message=process_message,
+        max_concurrency=10,
+        lease_manager=lease_manager,
+    )
+    processor._notify_owner = AsyncMock()
+    return processor
+
+
+async def _seed_two_accounts_two_requests(db_session, user, account):
+    """One pending request for the fixture account plus one for a
+    second account — two accounts, so the per-account lock does NOT
+    serialize them and only the disk lease can."""
+    from app.db.models.telegram_account import TelegramAccountStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+    from app.db.repositories.telegram_account_repo import (
+        TelegramAccountRepository,
+    )
+    from app.db.repositories.user_repo import UserRepository
+
+    user2 = await UserRepository(db_session).create(telegram_user_id=2002)
+    account2 = await TelegramAccountRepository(db_session).create(
+        user_id=user2.id, phone_masked="+628****0000",
+        status=TelegramAccountStatus.ACTIVE,
+    )
+    repo = LinkRequestRepository(db_session)
+    ids = []
+    for u, a, link in (
+        (user, account, "https://t.me/chan/1"),
+        (user2, account2, "https://t.me/chan/2"),
+    ):
+        row = await repo.create(
+            user_id=u.id, telegram_account_id=a.id, raw_link=link,
+        )
+        ids.append(row.id)
+    await db_session.commit()
+    return ids
+
+
+def _overlap_process_message():
+    import asyncio as _asyncio
+
+    overlap = {"active": 0, "max": 0}
+
+    async def process_message(**kwargs):
+        overlap["active"] += 1
+        overlap["max"] = max(overlap["max"], overlap["active"])
+        await _asyncio.sleep(0.1)
+        overlap["active"] -= 1
+        return "saved"
+
+    return AsyncMock(side_effect=process_message), overlap
+
+
+async def test_disk_lease_serializes_two_big_files_on_a_small_disk(
+    db_session, user, account
+):
+    """Two 600 MB saves (different accounts), usable disk 928 MB
+    (4000 free - 3072 reserve): the count cap (10) and the per-account
+    locks would both let them run at once; the byte lease must hold
+    the second until the first releases. Both still complete DONE."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+
+    ids = await _seed_two_accounts_two_requests(db_session, user, account)
+
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    process_message, overlap = _overlap_process_message()
+    processor = _disk_processor(
+        db_session, manager, process_message, free_mb=4000.0,
+    )
+    message = _fake_video_message(600 * 1024 * 1024)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            RestrictedContentService, "fetch_messages",
+            AsyncMock(return_value=[message]),
+        )
+        await processor.process_pending_once()
+
+    assert overlap["max"] == 1  # the lease serialized what the cap allowed
+    repo = LinkRequestRepository(db_session)
+    for rid in ids:
+        fresh = await repo.get_by_id(rid)
+        assert fresh.status == LinkRequestStatus.DONE
+    assert processor._lease_manager.total_leased_mb == 0.0  # all released
+
+
+async def test_disk_lease_disabled_lets_both_run_on_a_tiny_disk(
+    db_session, user, account
+):
+    """Reserve 0 = pre-existing behaviour: no byte admission at all,
+    so even a nearly-full disk does not serialize the two saves."""
+    from app.core.disk_lease import DiskLeaseManager
+
+    await _seed_two_accounts_two_requests(db_session, user, account)
+
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    process_message, overlap = _overlap_process_message()
+    lease_manager = DiskLeaseManager(
+        reserve_mb=0, big_file_mb=100, big_pool_percent=30,
+        big_guarantee_percent=15, free_mb_reader=lambda: 10.0,
+    )
+    factory = lambda: _SessionCtx(db_session)  # noqa: E731
+    processor = LinkRequestProcessor(
+        factory, manager,
+        process_message=process_message,
+        max_concurrency=10, lease_manager=lease_manager,
+    )
+    processor._notify_owner = AsyncMock()
+    message = _fake_video_message(600 * 1024 * 1024)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            RestrictedContentService, "fetch_messages",
+            AsyncMock(return_value=[message]),
+        )
+        await processor.process_pending_once()
+    assert overlap["max"] == 2  # ran concurrently, as before the feature
+
+
+async def test_disk_lease_too_large_request_fails_fast(
+    db_session, user, account
+):
+    """A 4500 MB post on a disk with 5000 MB free can never fit (the
+    absolute floor is 1024): the request is marked FAILED with the
+    reason recorded instead of waiting forever."""
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+
+    repo = LinkRequestRepository(db_session)
+    row = await repo.create(
+        user_id=user.id, telegram_account_id=account.id,
+        raw_link="https://t.me/chan/1",
+    )
+    await db_session.commit()
+    request_id = row.id
+
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    process_message = AsyncMock(return_value="saved")
+    processor = _disk_processor(
+        db_session, manager, process_message, free_mb=5000.0,
+    )
+    message = _fake_video_message(4500 * 1024 * 1024)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            RestrictedContentService, "fetch_messages",
+            AsyncMock(return_value=[message]),
+        )
+        await processor.process_pending_once()
+
+    process_message.assert_not_awaited()  # no download was attempted
+    fresh = await LinkRequestRepository(db_session).get_by_id(request_id)
+    assert fresh.status == LinkRequestStatus.FAILED
+    assert "too large" in (fresh.error or "")
+
+
+async def test_forward_only_request_needs_no_lease(db_session, user, account):
+    """An unprotected, untimed post is a server-side forward: zero
+    temp bytes. Even with the disk 'full' it must not wait for a
+    lease (its accounted size is 0)."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from telethon.tl.types import (
+        Document,
+        DocumentAttributeVideo,
+        MessageMediaDocument,
+    )
+
+    from app.db.models.link_request import LinkRequestStatus
+    from app.db.repositories.link_request_repo import LinkRequestRepository
+
+    repo = LinkRequestRepository(db_session)
+    row = await repo.create(
+        user_id=user.id, telegram_account_id=account.id,
+        raw_link="https://t.me/chan/1",
+    )
+    await db_session.commit()
+
+    document = Document(
+        id=777001, access_hash=0, file_reference=b"",
+        date=datetime.now(timezone.utc), mime_type="video/mp4",
+        size=900 * 1024 * 1024, thumbs=[], dc_id=2,
+        attributes=[DocumentAttributeVideo(duration=60, w=1280, h=720)],
+    )
+    message = SimpleNamespace(
+        id=42,
+        media=MessageMediaDocument(document=document, ttl_seconds=None),
+        message="caption",
+        noforwards=False,  # NOT protected -> forward path
+        document=document,
+    )
+    message.file = SimpleNamespace(size=900 * 1024 * 1024)
+
+    manager = MagicMock()
+    manager.get_client = MagicMock(return_value=MagicMock())
+    processor = _disk_processor(
+        db_session, manager, AsyncMock(return_value="saved"),
+        free_mb=3100.0,  # usable = 28 MB: any real lease would stall
+    )
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            RestrictedContentService, "fetch_messages",
+            AsyncMock(return_value=[message]),
+        )
+        count = await processor.process_pending_once()
+    assert count == 1
+    fresh = await LinkRequestRepository(db_session).get_by_id(row.id)
+    assert fresh.status == LinkRequestStatus.DONE
+
+
 async def test_processor_marks_failed_without_client(db_session, user, account):
     from app.db.models.link_request import LinkRequestStatus
     from app.db.repositories.link_request_repo import LinkRequestRepository

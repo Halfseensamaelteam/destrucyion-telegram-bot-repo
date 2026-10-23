@@ -52,16 +52,55 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from app.core.config import get_settings
+from app.core.disk_lease import DiskLeaseManager
 from app.core.logging import get_logger
 from app.telegram.link_parser import InviteRef, PostRef
+from app.telegram.media import classify_message
 
 log = get_logger(__name__)
 
 #: Budget-only mode's automatic temp-disk guard: each in-flight slot is
 #: assumed to hold one 200 MB-class temp file plus headroom (x1.5), so
 #: slots = free temp MB // this reserve. Deliberately conservative —
-#: the processor cannot know a link's file size before fetching it.
+#: that mode sizes ADMISSION (how many slots), while the size-aware
+#: disk leases (app.core.disk_lease) size the BYTES of requests that
+#: have already been fetched and measured.
 _DISK_RESERVE_PER_SLOT_MB = 300
+
+_MB = 1024 * 1024
+
+
+def request_download_size_mb(messages, *, unknown_size_mb: float) -> float:
+    """Total temp-disk MB a fetched request will occupy, BEFORE download.
+
+    Only download+upload writes temp bytes, and SavedMessagesService
+    takes that path exactly when a post is timed (ttl) or protected
+    (noforwards) — both visible on the fetched message, as is the file
+    size (``message.file.size``). Everything else is a server-side
+    forward: zero temp bytes, so it leases nothing. (A forward that
+    unexpectedly falls back to a resend downloads WITHOUT a lease —
+    rare, transient, and freed immediately after; the lease system
+    deliberately does not tax the common forward path for it.)
+
+    A download-path message whose size Telegram does not report is
+    accounted at ``unknown_size_mb`` (the big-file threshold) and so
+    also pushes the request into the big class — the conservative side.
+    """
+    total_bytes = 0
+    for message in messages:
+        if message is None:
+            continue
+        info = classify_message(message)
+        if info is None:
+            continue  # text-only / unsupported: nothing is downloaded
+        if not (info.is_protected or info.is_self_destruct):
+            continue  # server-side forward path: no temp file
+        size = getattr(getattr(message, "file", None), "size", None)
+        if not isinstance(size, (int, float)) or size <= 0:
+            total_bytes += int(unknown_size_mb * _MB)
+        else:
+            total_bytes += int(size)
+    return total_bytes / _MB
 
 
 class RestrictedContentError(Exception):
@@ -212,6 +251,11 @@ class LinkRequestProcessor:
         poll_interval: float | None = None,
         max_concurrency: int | None = None,
         memory_budget_mb: int | None = None,
+        disk_reserve_mb: int | None = None,
+        disk_big_file_mb: int | None = None,
+        disk_big_pool_percent: int | None = None,
+        disk_big_guarantee_percent: int | None = None,
+        lease_manager: DiskLeaseManager | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._manager = manager
@@ -250,6 +294,40 @@ class LinkRequestProcessor:
         self._account_locks: dict[int, asyncio.Lock] = {}
         self._rss_reader = process_rss_mb
         self._temp_free_reader = temp_free_mb
+        # Size-aware disk admission (app.core.disk_lease): after a
+        # request's messages are fetched — when their total download
+        # size is known but before a single byte is downloaded — the
+        # request leases that many temp-disk bytes, so parallelism is
+        # bounded by BYTES with a two-class pool/guarantee split, not
+        # just by slot count. Reserve 0 disables it (pre-existing
+        # behaviour, bit for bit). The manager reads free space through
+        # this processor's reader, so tests can substitute one seam.
+        if lease_manager is not None:
+            self._lease_manager = lease_manager
+        else:
+            self._lease_manager = DiskLeaseManager(
+                reserve_mb=(
+                    settings.link_request_disk_reserve_mb
+                    if disk_reserve_mb is None
+                    else disk_reserve_mb
+                ),
+                big_file_mb=(
+                    settings.link_request_big_file_mb
+                    if disk_big_file_mb is None
+                    else disk_big_file_mb
+                ),
+                big_pool_percent=(
+                    settings.link_request_big_pool_percent
+                    if disk_big_pool_percent is None
+                    else disk_big_pool_percent
+                ),
+                big_guarantee_percent=(
+                    settings.link_request_big_guarantee_percent
+                    if disk_big_guarantee_percent is None
+                    else disk_big_guarantee_percent
+                ),
+                free_mb_reader=lambda: self._temp_free_reader(),
+            )
         self._last_disk_cap: int | None = None
         # The adaptive limit STARTS at the full cap: the budget is a
         # brake, not a ramp. The supervisor re-evaluates every tick
@@ -330,11 +408,20 @@ class LinkRequestProcessor:
             max_concurrency=self._max_concurrency,
             memory_budget_mb=self._memory_budget_mb,
             budget_only=self._budget_only,
+            disk_reserve_mb=(
+                self._lease_manager.reserve_mb
+                if self._lease_manager.enabled
+                else 0
+            ),
         )
         while True:
             try:
                 await self._reset_stale_throttled()
                 self._reap()
+                # Lease waiters normally wake on releases; the tick
+                # also covers free space changed by OTHER tenants of
+                # the disk (logs, another container, the operator).
+                self._lease_manager.kick()
                 await self._top_up()
             except Exception as exc:  # one bad cycle must never kill the loop
                 log.error("link_request_cycle_failed", error=str(exc))
@@ -517,28 +604,63 @@ class LinkRequestProcessor:
     async def _save_ref(self, client, request, ref: PostRef, settings) -> int:
         service = RestrictedContentService(client, account_id=request.telegram_account_id)
         ids = ref.message_ids[: settings.restricted_max_batch]
-        saved = 0
-        for index, msg_id in enumerate(ids):
-            single = PostRef(
-                peer=ref.peer, message_ids=(msg_id,),
-                is_private=ref.is_private, topic_id=ref.topic_id,
-            )
-            (message,) = await service.fetch_messages(single)
-            if message is None:
-                continue
-            outcome = await self._process_message(
-                message=message,
-                account_id=request.telegram_account_id,
-                manager=self._manager,
-                session_factory=self._session_factory,
-                force=True,
-                capture_only_timed=False,
-            )
-            if outcome in ("saved", "duplicate"):
-                saved += 1
-            if index < len(ids) - 1 and settings.restricted_batch_delay_seconds > 0:
-                await asyncio.sleep(settings.restricted_batch_delay_seconds)
-        return saved
+        # Fetch the whole ref first (the same per-id RPC loop, just
+        # all of it up front): the request's total download size is
+        # only knowable once every message has been seen, and the disk
+        # lease below must be held BEFORE the first byte is downloaded.
+        # Trade-off, accepted deliberately: a fetch error mid-range now
+        # aborts the request before any item is saved, where the old
+        # one-at-a-time loop had already saved the earlier items (the
+        # request was marked FAILED either way; in practice fetch
+        # errors are chat-level and hit on the first id).
+        capped = PostRef(
+            peer=ref.peer, message_ids=tuple(ids),
+            is_private=ref.is_private, topic_id=ref.topic_id,
+        )
+        messages = await service.fetch_messages(capped)
+        lease = await self._acquire_disk_lease(request, messages, settings)
+        try:
+            saved = 0
+            for index, message in enumerate(messages):
+                if message is None:
+                    continue
+                outcome = await self._process_message(
+                    message=message,
+                    account_id=request.telegram_account_id,
+                    manager=self._manager,
+                    session_factory=self._session_factory,
+                    force=True,
+                    capture_only_timed=False,
+                )
+                if outcome in ("saved", "duplicate"):
+                    saved += 1
+                if index < len(ids) - 1 and settings.restricted_batch_delay_seconds > 0:
+                    await asyncio.sleep(settings.restricted_batch_delay_seconds)
+            return saved
+        finally:
+            if lease is not None:
+                lease.release()
+
+    async def _acquire_disk_lease(self, request, messages, settings):
+        """Lease this request's total download size, or None.
+
+        None when disk admission is disabled (reserve 0) or when the
+        request downloads nothing at all (pure forwards / text) — a
+        zero lease could never wait, so it is never taken. A too-large
+        request raises DiskLeaseTooLargeError, which the caller's
+        error path turns into a FAILED row with the reason recorded.
+        """
+        if not self._lease_manager.enabled:
+            return None
+        total_mb = request_download_size_mb(
+            messages,
+            unknown_size_mb=settings.link_request_big_file_mb,
+        )
+        if total_mb <= 0:
+            return None
+        return await self._lease_manager.acquire(
+            total_mb, request_id=request.id
+        )
 
     async def _notify_owner(self, request, text: str) -> None:
         """Best-effort Bot API status update for the requesting user.

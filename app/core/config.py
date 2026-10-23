@@ -204,6 +204,51 @@ class Settings(BaseSettings):
             "Must exceed the longest legitimate save duration."
         ),
     )
+    link_request_disk_reserve_mb: int = Field(
+        default=3072,
+        description=(
+            "Size-aware disk admission: the worker leases temp-disk "
+            "BYTES per link request (its total media size, known from "
+            "the fetched messages before any download starts) and only "
+            "starts a download while free temp space minus all active "
+            "leases stays at or above this reserve. Set 0 to disable "
+            "disk admission entirely — behaviour is then exactly the "
+            "pre-existing slot-cap/RAM-budget logic."
+        ),
+    )
+    link_request_big_file_mb: int = Field(
+        default=100,
+        description=(
+            "Size-aware disk admission: a link request whose TOTAL "
+            "media size exceeds this many MB is 'big class' and leases "
+            "against the capped big pool instead of the general disk, "
+            "so floods of huge videos cannot crowd out small saves."
+        ),
+    )
+    link_request_big_pool_percent: int = Field(
+        default=30,
+        ge=0,
+        le=100,
+        description=(
+            "Size-aware disk admission: big-class requests together "
+            "may lease at most this percent of the usable temp disk "
+            "(free minus the reserve). They keep moving — just bounded "
+            "— while the rest of the disk stays available to small "
+            "files. A single big file larger than the whole pool is "
+            "still admitted on an otherwise idle disk."
+        ),
+    )
+    link_request_big_guarantee_percent: int = Field(
+        default=15,
+        ge=0,
+        le=100,
+        description=(
+            "Size-aware disk admission: this percent of the usable "
+            "temp disk is fenced off from SMALL leases, so the big "
+            "class always has room to start even during a small-file "
+            "flood (no starvation in either direction)."
+        ),
+    )
     display_timezone: str = Field(
         default="UTC",
         description=(
