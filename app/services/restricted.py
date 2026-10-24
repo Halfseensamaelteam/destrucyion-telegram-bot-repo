@@ -48,6 +48,8 @@ Honest limits (CLAUDE.md §8 — never over-promise):
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -552,7 +554,7 @@ class LinkRequestProcessor:
     async def _process_request(self, request) -> None:
         from app.db.models.link_request import LinkRequestStatus
         from app.db.repositories.link_request_repo import LinkRequestRepository
-        from app.telegram.link_parser import parse_link
+        from app.telegram.link_parser import parse_link, parse_story_link
 
         settings = get_settings()
 
@@ -574,6 +576,23 @@ class LinkRequestProcessor:
                     "Your Telegram account is not running in the worker "
                     "(disconnected or subscription inactive)."
                 )
+
+            # Story rows (queued ONLY by /story) branch before the post
+            # path: story links never parse as PostRef, so this check
+            # cannot change any existing /save behaviour.
+            story_ref = parse_story_link(request.raw_link)
+            if story_ref is not None:
+                await self._notify_owner(
+                    request,
+                    "⏳ Working on it — downloading now…",
+                )
+                saved = await self._save_stories(client, request, story_ref, settings)
+                await _set_status(LinkRequestStatus.DONE, result_count=saved)
+                await self._notify_owner(
+                    request,
+                    f"✅ Done: {saved} item(s) from your link are in your Saved Messages.",
+                )
+                return
 
             parsed = parse_link(request.raw_link)
             if parsed is None:
@@ -645,6 +664,84 @@ class LinkRequestProcessor:
                     saved += 1
                 if index < len(ids) - 1 and settings.restricted_batch_delay_seconds > 0:
                     await asyncio.sleep(settings.restricted_batch_delay_seconds)
+            return saved
+        finally:
+            if lease is not None:
+                lease.release()
+
+    async def _save_stories(self, client, request, ref, settings) -> int:
+        """Download stories and upload them to the owner's Saved Messages.
+
+        Stories are downloads, so they lease temp-disk bytes exactly like
+        restricted downloads (size known from the story media before any
+        byte is downloaded; unknown sizes counted at the big-file
+        threshold). Upload is a direct ``send_file`` to Saved Messages
+        with the story caption verbatim — stories have no message id,
+        so they deliberately do NOT go through the message-based
+        ``_process_message`` path or its media_records dedup: explicit
+        saves always fetch fresh anyway (standing policy), and a story
+        re-requested later is simply saved again.
+
+        All-stories requests are capped at ``restricted_max_batch``
+        (same anti-flood cap as post ranges) and paced the same way.
+        """
+        from app.services.story import StoryService, story_media_size_bytes
+        from telethon.tl.types import InputPeerSelf
+
+        service = StoryService(client, account_id=request.telegram_account_id)
+        if ref.story_id is not None:
+            stories = [await service.fetch_single(ref)]
+        else:
+            stories = await service.fetch_all(ref)
+            if not stories:
+                raise RestrictedContentError(
+                    "That account has no active stories right now."
+                )
+            stories = stories[: settings.restricted_max_batch]
+
+        lease = None
+        if self._lease_manager.enabled:
+            total_bytes = 0
+            for story in stories:
+                if getattr(story, "media", None) is None:
+                    continue  # downloads nothing, leases nothing
+                size = story_media_size_bytes(story)
+                total_bytes += (
+                    size
+                    if size
+                    else int(settings.link_request_big_file_mb * _MB)
+                )
+            if total_bytes > 0:
+                lease = await self._lease_manager.acquire(
+                    total_bytes / _MB, request_id=request.id
+                )
+        try:
+            saved = 0
+            with tempfile.TemporaryDirectory() as tmp:
+                for index, story in enumerate(stories):
+                    media = getattr(story, "media", None)
+                    if media is None:
+                        continue  # text/poll-only story: nothing to save
+                    path = await client.download_media(
+                        media,
+                        file=os.path.join(tmp, f"story_{story.id}"),
+                    )
+                    caption = getattr(story, "caption", None) or None
+                    await client.send_file(
+                        InputPeerSelf(), path, caption=caption
+                    )
+                    saved += 1
+                    if (
+                        index < len(stories) - 1
+                        and settings.restricted_batch_delay_seconds > 0
+                    ):
+                        await asyncio.sleep(
+                            settings.restricted_batch_delay_seconds
+                        )
+            if saved == 0:
+                raise RestrictedContentError(
+                    "Those stories have no photo or video to save."
+                )
             return saved
         finally:
             if lease is not None:

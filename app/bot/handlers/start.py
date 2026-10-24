@@ -65,6 +65,8 @@ async def help_command(
         "🔹 /save <link> - Save a post by t.me link (works for private / "
         "restricted channels your account has joined; send an invite link "
         "first if it has not)\n"
+        "🔹 /story <link> - Download Telegram stories: one story with "
+        "t.me/<username>/s/<id>, or all active stories with t.me/<username>\n"
         "🔹 /capture - Auto-Capture add-on: auto-save protected media "
         "from ONE channel/group you register (paid add-on)\n"
         "🔹 /disconnect - Unlink your account\n"

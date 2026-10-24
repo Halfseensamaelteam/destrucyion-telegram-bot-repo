@@ -38,6 +38,7 @@ from app.bot.handlers.admin import admin_command
 from app.bot.handlers.phone_login import connect_phone_command
 from app.bot.handlers.channel_gate import channel_membership_gate, check_channel_membership
 from app.bot.handlers.restricted import save_link_command, save_link_message
+from app.bot.handlers.story import story_command
 from app.bot.handlers.capture import capture_command, capture_payment_callback
 
 
@@ -101,6 +102,9 @@ def create_bot_app() -> Application:
         MessageHandler(filters.TEXT & ~filters.COMMAND, save_link_message),
         group=1,
     )
+
+    # Story downloads (/story only — /save never accepts story links).
+    application.add_handler(CommandHandler("story", story_command))
 
     # Admin
     application.add_handler(CommandHandler("admin", admin_command))

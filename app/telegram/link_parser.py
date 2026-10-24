@@ -77,6 +77,31 @@ class InviteRef:
     invite_hash: str
 
 
+@dataclass(frozen=True)
+class StoryRef:
+    """A reference to Telegram stories, handled ONLY by the /story command.
+
+    Attributes:
+        peer: Username string Telethon's ``get_input_entity`` accepts.
+            Stories have no private-link form: a peer without a username
+            has no public story link, so only usernames occur here.
+        story_id: One story id for ``/<username>/s/<story_id>``, or None
+            for a bare ``/<username>`` link, which means "all currently
+            active stories of this peer" (active + pinned/highlight).
+
+    Deliberately separate from PostRef: /save must never treat a story
+    link as a post link, and /story must never treat a post link as a
+    story link. The two commands share nothing but the queue row shape.
+    """
+
+    peer: str
+    story_id: int | None = None
+
+    @property
+    def all_active(self) -> bool:
+        return self.story_id is None
+
+
 def _parse_id_or_range(segment: str) -> tuple[int, ...] | None:
     """Parse ``123`` or ``100-110`` into a tuple of message ids.
 
@@ -169,3 +194,55 @@ def parse_link(text: str) -> PostRef | InviteRef | None:
 def find_post_or_invite(text: str) -> PostRef | InviteRef | None:
     """Alias kept readable at call sites that scan whole messages."""
     return parse_link(text)
+
+
+def parse_story_link(text: str) -> StoryRef | None:
+    """Parse the FIRST Telegram story link found in ``text``.
+
+    Accepted shapes (only these — post links, invite links and anything
+    else return None, so /story never swallows a /save link):
+
+      Single story   https://t.me/<username>/s/<story_id>
+      All active     https://t.me/<username>
+
+    The bare-username form is unambiguous for /story: a bare username
+    carries no message id, so it can never be a post link, and story
+    links never use the /c/ or /b/ prefixes. Pure function — safe to
+    call on any user input.
+    """
+    if not text:
+        return None
+    match = _LINK_RE.search(text)
+    if not match:
+        return None
+
+    path = match.group("path").strip("/")
+    if not path:
+        return None
+
+    # Invites are not stories.
+    for prefix in _INVITE_PREFIXES:
+        if path.startswith(prefix):
+            return None
+    if path.startswith("+"):
+        return None
+
+    parts = [p for p in path.split("/") if p != ""]
+
+    # Single story: /<username>/s/<story_id>
+    if len(parts) == 3 and parts[1] == "s":
+        username, story_id = parts[0], parts[2]
+        if username in ("c", "b", "s") or username.isdigit():
+            return None
+        if not story_id.isdigit() or int(story_id) <= 0:
+            return None
+        return StoryRef(peer=username, story_id=int(story_id))
+
+    # All active stories: bare /<username>
+    if len(parts) == 1:
+        username = parts[0]
+        if username in ("c", "b", "s") or username.isdigit():
+            return None
+        return StoryRef(peer=username, story_id=None)
+
+    return None

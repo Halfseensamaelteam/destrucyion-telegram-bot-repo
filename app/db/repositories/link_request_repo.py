@@ -40,6 +40,26 @@ class LinkRequestRepository:
         await self._session.refresh(request)
         return request
 
+    async def has_active(self, telegram_account_id: int) -> bool:
+        """True when this account already has a PENDING or PROCESSING row.
+
+        Used by the /save anti-spam gate: one outstanding request per
+        account at a time. Best-effort by design — two near-simultaneous
+        /save commands can both pass this check before either row is
+        committed; the worker's per-account lock still guarantees only
+        one download actually runs per account, so the gate is a
+        UX/anti-spam guard, never a correctness guarantee.
+        """
+        result = await self._session.execute(
+            select(LinkRequest.id).where(
+                LinkRequest.telegram_account_id == telegram_account_id,
+                LinkRequest.status.in_(
+                    [LinkRequestStatus.PENDING, LinkRequestStatus.PROCESSING]
+                ),
+            ).limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def get_by_id(self, request_id: int) -> LinkRequest | None:
         result = await self._session.execute(
             select(LinkRequest).where(LinkRequest.id == request_id)

@@ -94,12 +94,26 @@ async def save_link_command(
         )
         return
 
+    # ONE outstanding request per account (anti-spam): while a previous
+    # /save is still queued or processing, a new link is refused instead
+    # of piling up behind it. Deliberately checked BEFORE the "Queued"
+    # status message, so a refused request leaves no status message and
+    # no queue row behind. Best-effort (see has_active): two
+    # near-simultaneous commands can both pass; the worker's
+    # per-account lock still serializes their downloads.
+    link_repo = LinkRequestRepository(session)
+    if await link_repo.has_active(account.id):
+        await update.message.reply_text(
+            "⏳ You still have a save in progress — please wait until it "
+            "finishes before sending another link."
+        )
+        return
+
     # ONE status message per request: the bot sends "Queued" now and the
     # worker EDITS this same message as the state changes (Working ->
     # Done/Failed) instead of posting a new message per state. Its ids
     # ride along on the queue row so the worker can find it.
     status_msg = await update.message.reply_text("⏳ Queued…")
-    link_repo = LinkRequestRepository(session)
     await link_repo.create(
         user_id=user.id,
         telegram_account_id=account.id,
